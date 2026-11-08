@@ -13,10 +13,16 @@ import config
 from database.connection import DatabaseError, get_connection
 from database.schema import initialise_database
 from trace_app import ui
-from trace_app.models import ExtractionStatus, format_timestamp
+from trace_app.models import (
+    EVIDENCE_LABELS,
+    ExtractionStatus,
+    ReconstructionStatus,
+    format_timestamp,
+)
 from trace_app.services.document_service import DocumentService, extraction_summary
 from trace_app.services.extraction_service import segments_from_json
 from trace_app.services.project_service import ProjectService, ValidationError
+from trace_app.services.reconstruction_service import ReconstructionService
 from trace_app.utils.file_validation import human_size
 
 PAGE_DASHBOARD = "Dashboard"
@@ -43,6 +49,10 @@ def _project_service() -> ProjectService:
 
 def _document_service() -> DocumentService:
     return DocumentService(_database())
+
+
+def _reconstruction_service() -> ReconstructionService:
+    return ReconstructionService(_database())
 
 
 def _goto(page: str, project_id: str | None = None) -> None:
@@ -266,6 +276,134 @@ def _render_workspace(service: ProjectService) -> None:
 
     st.markdown(ui.divider(), unsafe_allow_html=True)
     _render_sources_section(project)
+    st.markdown(ui.divider(), unsafe_allow_html=True)
+    _render_reconstruction_section(project)
+
+
+# --------------------------------------------------------------------------
+# Reconstruction
+# --------------------------------------------------------------------------
+
+def _render_reconstruction_section(project: dict) -> None:
+    documents = _document_service()
+    reconstructions = _reconstruction_service()
+
+    st.markdown("## Reconstruction")
+
+    usable = documents.usable_sources(project["id"])
+    latest = reconstructions.latest(project["id"])
+    status = str(latest["status"]) if latest else ReconstructionStatus.NOT_STARTED
+
+    header, action = st.columns([3, 1.1], vertical_alignment="center")
+    with header:
+        detail = f"{len(usable)} source(s) with extracted text would be analysed."
+        if latest:
+            kind = (
+                "Deterministic preview"
+                if latest["is_demo_preview"]
+                else f"{latest['model_provider']} / {latest['model_name']}"
+            )
+            detail = (
+                f"Last run {format_timestamp(latest['created_at'])} · {kind} · "
+                f"{latest['source_count']} source(s)"
+            )
+        st.markdown(
+            ui.reconstruction_pill(status)
+            + f'<div class="trace-note" style="margin-top:0.4rem">'
+            f"{html.escape(detail)}</div>",
+            unsafe_allow_html=True,
+        )
+    with action:
+        label = "Run reconstruction" if not latest else "Run again"
+        disabled = not usable
+        if st.button(label, type="primary", disabled=disabled, width="stretch"):
+            with st.spinner("Reading sources and checking evidence…"):
+                outcome = reconstructions.run(project)
+            st.session_state["reconstruction_outcome"] = {
+                "ok": outcome.ok,
+                "message": outcome.message,
+                "notes": outcome.notes,
+                "is_preview": outcome.is_preview,
+            }
+            st.rerun()
+
+    if not usable:
+        st.info(
+            "Add at least one source with extractable text before running a "
+            "reconstruction."
+        )
+
+    llm = config.get_llm_config()
+    if not llm.is_configured:
+        st.warning(
+            "No AI provider is configured, so TRACE will produce a clearly "
+            "labelled deterministic preview instead of a model-generated "
+            "draft. The preview quotes sentences containing category cue "
+            "words; it does not analyse or interpret them. Set LLM_API_KEY to "
+            "enable AI reconstruction."
+        )
+
+    outcome = st.session_state.pop("reconstruction_outcome", None)
+    if outcome:
+        if not outcome["ok"]:
+            st.error(outcome["message"])
+        else:
+            st.success(outcome["message"])
+            if outcome["is_preview"]:
+                st.warning(
+                    "This draft was produced by deterministic keyword matching. "
+                    "No AI model was called."
+                )
+
+    if latest and status == ReconstructionStatus.DRAFT_READY:
+        _render_draft_summary(project, latest)
+
+
+def _render_draft_summary(project: dict, latest: dict) -> None:
+    del project
+    reconstructions = _reconstruction_service()
+    summary = reconstructions.evidence_summary(latest["id"])
+    total = sum(summary.values())
+    if not total:
+        st.info(
+            "The last run produced no items the sources support. Nothing was "
+            "invented to fill the gap."
+        )
+        return
+
+    st.markdown(
+        f'<div class="trace-meta-label" style="margin-top:0.9rem">'
+        f"Evidence status across {total} proposed item(s)</div>",
+        unsafe_allow_html=True,
+    )
+    pills = " ".join(
+        ui.evidence_pill(status) + f' <span class="trace-note">{count}</span>'
+        for status, count in summary.items()
+        if count
+    )
+    st.markdown(
+        f'<div style="margin:0.45rem 0 0.2rem">{pills}</div>', unsafe_allow_html=True
+    )
+
+    missing = reconstructions.missing_information(latest)
+    if missing:
+        with st.expander(f"Missing information noted by this run ({len(missing)})"):
+            for entry in missing:
+                st.markdown(
+                    f'<div class="trace-note" style="margin-bottom:0.45rem">• '
+                    f"{html.escape(entry)}</div>",
+                    unsafe_allow_html=True,
+                )
+
+    if latest.get("processing_notes"):
+        with st.expander("What TRACE checked during this run"):
+            for note in str(latest["processing_notes"]).split("\n"):
+                if note.strip():
+                    st.markdown(
+                        f'<div class="trace-note" style="margin-bottom:0.4rem">• '
+                        f"{html.escape(note.strip())}</div>",
+                        unsafe_allow_html=True,
+                    )
 
 
 # --------------------------------------------------------------------------

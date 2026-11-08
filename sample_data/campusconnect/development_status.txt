@@ -1,0 +1,30 @@
+CampusConnect - Development Status
+SYNTHETIC DEMONSTRATION DATA. This describes a fictional project and no real institution.
+
+Completed work
+
+The event listing interface is complete. It renders the list of upcoming events, supports
+filtering by category and by date, and has been reviewed against the design.
+
+The event detail page is complete, including the fee display used for paid events.
+
+The read-only integration with the campus timetable system is complete and is pulling event
+records into the portal successfully.
+
+The event capacity limit is implemented as 300 attendees.
+
+In progress
+
+Registration validation remains unfinished. The form submits, but it does not yet reject a
+registration for an event that has already reached capacity, and it does not yet reject a
+duplicate registration from the same student.
+
+The moderation queue used by student-services staff is partially built. The queue displays
+items but the approve and reject actions are not wired up.
+
+Not started
+
+The accessibility review has not started. The portal cannot be published to students until
+that review is complete.
+
+Automated end-to-end tests have not been written.

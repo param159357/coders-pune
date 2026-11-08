@@ -1,0 +1,32 @@
+CampusConnect - Meeting Notes
+SYNTHETIC DEMONSTRATION DATA. This describes a fictional project and no real institution.
+
+Meeting 1 - Scope review
+
+The team selected option A for the first release. Option A delivers event discovery and
+registration only. Option B would have added payment handling in the same release.
+
+The reason given for selecting option A was that the payment provider contract had not been
+signed, and the team did not want the release date to depend on a contract outside its
+control.
+
+Payment integration was postponed until after the first release as a direct result of that
+decision.
+
+Meeting 2 - Registration design
+
+It was agreed that registration will capture the student identifier, the event identifier,
+and a timestamp. Registration will not capture dietary requirements in the first release,
+because storing that data was judged to need a privacy review that has not been scheduled.
+
+The team agreed that the maximum capacity for a single event is 500 attendees.
+
+Meeting 3 - Release readiness
+
+The release depends on approval of the final event data format by the timetable team. That
+approval has been requested and has not yet been given.
+
+A launch date was discussed but not agreed. No confirmed launch date is documented.
+
+Action items recorded in this meeting were to finish registration validation and to arrange
+a test email service. No owner was recorded against either action.

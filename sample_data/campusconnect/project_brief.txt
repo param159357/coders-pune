@@ -1,0 +1,34 @@
+CampusConnect - Project Brief
+SYNTHETIC DEMONSTRATION DATA. This describes a fictional project and no real institution.
+
+Purpose
+
+CampusConnect is a campus event and student-services portal. It gives students a single
+place to find out what is happening on campus and to register for it, and gives student
+societies a simple way to publish their events.
+
+Scope of the first release
+
+The initial release focuses on event discovery and student registration. Students can
+browse a list of upcoming events, filter them by category and date, open an event to see
+its details, and register for a place.
+
+Payment integration was postponed until after the first release. Events that require a fee
+are listed with the fee shown, but payment is collected offline by the organising society.
+
+Out of scope for the first release
+
+Society self-service account creation, the alumni directory, and the mobile application
+are all out of scope for the first release. They were discussed but deliberately deferred.
+
+Users
+
+The portal serves three groups: students who discover and register for events, society
+organisers who publish and manage events, and student-services staff who moderate
+published content.
+
+Constraints
+
+The portal must meet the institution's accessibility standard before it can be published
+to students. Event data is supplied by the existing campus timetable system, so the format
+of that data is agreed with the timetable team rather than chosen by this project.

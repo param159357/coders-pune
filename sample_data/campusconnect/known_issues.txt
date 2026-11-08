@@ -1,0 +1,33 @@
+CampusConnect - Known Issues, Risks and Open Questions
+SYNTHETIC DEMONSTRATION DATA. This describes a fictional project and no real institution.
+
+Blockers
+
+Email notification testing is blocked by the absence of a configured test email service.
+Registration confirmation emails cannot be verified until that service exists, so the
+notification code is written but unverified.
+
+Dependencies
+
+The release depends on approval of the final event data format. Until the timetable team
+approves the format, the integration cannot be treated as stable.
+
+The accessibility review depends on the institution's accessibility team, who have not yet
+been formally approached.
+
+Risks
+
+If the event data format changes after development is complete, the timetable integration
+will need rework, and that rework would delay the release.
+
+There is a risk that the moderation queue is not finished before the release, which would
+leave published content unmoderated.
+
+Open questions
+
+It is unclear whether students should be able to cancel a registration themselves, or
+whether cancellation must go through a society organiser. This has not been decided.
+
+The owner for the final accessibility review is not documented.
+
+No confirmed launch date is documented.

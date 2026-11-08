@@ -83,12 +83,20 @@ coders-pune/
 ├── trace_app/
 │   ├── models.py              # Status enums, display labels, ID/time helpers
 │   ├── ui.py                  # Theme, status pills, shared presentation
+│   ├── ai/
+│   │   ├── provider.py           # Provider abstraction + Gemini client
+│   │   ├── prompts.py            # Evidence rules and injection defences
+│   │   ├── schemas.py            # Pydantic validation of model output
+│   │   └── offline_preview.py    # Rule-based draft when no key is set
 │   ├── services/
-│   │   ├── project_service.py    # Project validation and retrieval
-│   │   ├── document_service.py   # Upload orchestration and deletion
-│   │   └── extraction_service.py # PDF/DOCX/TXT text + location extraction
+│   │   ├── project_service.py        # Project validation and retrieval
+│   │   ├── document_service.py       # Upload orchestration and deletion
+│   │   ├── extraction_service.py     # PDF/DOCX/TXT text + location extraction
+│   │   ├── evidence_service.py       # Verifies every citation against sources
+│   │   └── reconstruction_service.py # The reconstruction pipeline
 │   └── utils/
-│       └── file_validation.py    # Type, size, magic-byte checks; safe paths
+│       ├── file_validation.py    # Type, size, magic-byte checks; safe paths
+│       └── text_chunking.py      # Deterministic chunking with overlap
 └── tests/                     # pytest suite
 ```
 
@@ -109,6 +117,35 @@ pip install -r requirements.txt
 
 cp .env.example .env             # then edit .env and add your key
 ```
+
+### How evidence verification works
+
+This is the part that makes TRACE more than a summariser, so it is worth
+stating precisely. For every citation the model returns:
+
+1. **The source must be real.** The ID is looked up among *this project's*
+   sources only. An invented ID, or one belonging to another project, is
+   discarded and never reaches the database.
+2. **The quotation must be real.** The excerpt must occur in that source's
+   extracted text, compared with whitespace and case normalised. A paraphrase
+   does not count.
+3. **The location must be real.** The page or paragraph is recomputed from the
+   segment the quotation was actually found in. A wrong page number is
+   corrected rather than displayed.
+
+The resulting evidence status can only be **lowered** relative to what the
+model claimed, never raised:
+
+| Model claimed | What verified | Stored as |
+|---|---|---|
+| `supported` | nothing | `unsupported` |
+| `supported` | some citations | `partially_supported` |
+| `supported` | all citations | `supported` |
+| `conflicting` | one side only | `needs_review` |
+| `needs_review` | all citations | `needs_review` (never upgraded) |
+
+An owner or a due date is dropped entirely unless something verified supports
+it. A model that labels everything "supported" therefore gains nothing by it.
 
 ## 6. Environment variables
 
@@ -159,7 +196,7 @@ means the tests were actually executed and the app was actually run.
 |---|---|
 | 1 — Foundation: schema, project create/list, dashboard | **Done, verified** |
 | 2 — Document ingestion: upload, validation, extraction | **Done, verified** |
-| 3 — AI reconstruction: provider, schemas, evidence checking | Not started |
+| 3 — AI reconstruction: provider, schemas, evidence checking | **Done** (live Gemini call not yet verified — see limitations) |
 | 4 — Review: edit, approve, reject, evidence inspection | Not started |
 | 5 — Export: Markdown and PDF handover report | Not started |
 | 6 — CampusConnect demo, end-to-end test, deployment | Not started |
@@ -183,6 +220,14 @@ Stated plainly, because an honest limitation is worth more than an overclaim.
   but a lightly edited near-duplicate is not.
 - **No external integrations.** Slack, GitHub, Teams, and email ingestion are
   not implemented.
+- **The live Gemini call has not been exercised yet.** The provider, its error
+  handling, and the whole pipeline are covered by tests using a fake provider,
+  and the offline path runs the identical validation and verification code. The
+  real HTTP call to Gemini still needs one run against a real key.
+- **Evidence matching is exact, not semantic.** A quotation must occur in the
+  source after whitespace and case are normalised. A correctly paraphrased
+  claim is therefore marked unsupported rather than accepted — a deliberate
+  choice to fail safe.
 - Further limitations are added here as later milestones land.
 
 ## 11. AI assistance and external services
