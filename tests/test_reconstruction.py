@@ -10,6 +10,7 @@ import pytest
 from database.repositories import EvidenceRepository, HandoverItemRepository
 from trace_app.ai.provider import (
     LLMBadResponse,
+    LLMError,
     LLMNotConfigured,
     LLMProvider,
     LLMUnavailable,
@@ -479,3 +480,132 @@ def test_missing_information_is_persisted_for_the_report(seeded) -> None:
         "No launch date is documented."
     ]
     assert json.loads(latest["validated_json"])["is_demo_preview"] is False
+
+
+# --------------------------------------------------------------------------
+# Transient provider failures and model fallback
+# --------------------------------------------------------------------------
+
+def _provider(monkeypatch, fallbacks=()):
+    import trace_app.ai.provider as provider_module
+
+    monkeypatch.setattr(provider_module.time, "sleep", lambda _: None)
+    return provider_module.GeminiProvider(
+        api_key="k", model="primary-model", fallback_models=fallbacks
+    )
+
+
+class _Reply:
+    def __init__(self, text='{"items": []}'):
+        self.text = text
+
+
+def test_a_transient_failure_is_retried_then_succeeds(monkeypatch) -> None:
+    """A 503 on shared capacity must not sink the run."""
+    provider = _provider(monkeypatch)
+    calls: list[str] = []
+
+    def flaky(model, user_prompt, config):
+        calls.append(model)
+        if len(calls) < 3:
+            raise RuntimeError("503 UNAVAILABLE: experiencing high demand")
+        return _Reply()
+
+    monkeypatch.setattr(provider, "_call", flaky)
+    assert provider.generate_json("sys", "user") == {"items": []}
+    assert calls == ["primary-model"] * 3
+    assert provider.model_used == "primary-model"
+    assert provider.notes == []  # no fallback happened, so nothing to disclose
+
+
+def test_retries_give_up_and_report_the_failure(monkeypatch) -> None:
+    import trace_app.ai.provider as provider_module
+
+    provider = _provider(monkeypatch)
+    calls: list[str] = []
+
+    def always_down(model, user_prompt, config):
+        calls.append(model)
+        raise RuntimeError("503 UNAVAILABLE: experiencing high demand")
+
+    monkeypatch.setattr(provider, "_call", always_down)
+    with pytest.raises(LLMUnavailable):
+        provider.generate_json("sys", "user")
+    assert len(calls) == provider_module.MAX_ATTEMPTS
+
+
+def test_a_permanent_failure_is_not_retried(monkeypatch) -> None:
+    """A rejected key must fail immediately, not three times."""
+    provider = _provider(monkeypatch)
+    calls: list[str] = []
+
+    def bad_key(model, user_prompt, config):
+        calls.append(model)
+        raise RuntimeError("403 PERMISSION_DENIED: api key not valid")
+
+    monkeypatch.setattr(provider, "_call", bad_key)
+    with pytest.raises(LLMError):
+        provider.generate_json("sys", "user")
+    assert len(calls) == 1
+
+
+def test_an_unavailable_model_falls_back_to_the_next_one(monkeypatch) -> None:
+    """Google's shared capacity fails often enough to need a second choice."""
+    provider = _provider(monkeypatch, fallbacks=("backup-model",))
+    calls: list[str] = []
+
+    def primary_down(model, user_prompt, config):
+        calls.append(model)
+        if model == "primary-model":
+            raise RuntimeError("503 UNAVAILABLE: experiencing high demand")
+        return _Reply()
+
+    monkeypatch.setattr(provider, "_call", primary_down)
+    assert provider.generate_json("sys", "user") == {"items": []}
+    assert provider.model_used == "backup-model"
+    assert calls.count("primary-model") == 3  # exhausted its retries first
+    assert calls[-1] == "backup-model"
+    # The substitution is disclosed, not silent.
+    assert provider.notes and "backup-model" in provider.notes[0]
+
+
+def test_a_retired_model_falls_back_to_the_next_one(monkeypatch) -> None:
+    provider = _provider(monkeypatch, fallbacks=("backup-model",))
+
+    def retired(model, user_prompt, config):
+        if model == "primary-model":
+            raise RuntimeError("404 NOT_FOUND: this model is no longer available")
+        return _Reply()
+
+    monkeypatch.setattr(provider, "_call", retired)
+    assert provider.generate_json("sys", "user") == {"items": []}
+    assert provider.model_used == "backup-model"
+
+
+def test_a_malformed_reply_is_not_retried_on_another_model(monkeypatch) -> None:
+    """A different model would not fix unreadable JSON."""
+    provider = _provider(monkeypatch, fallbacks=("backup-model",))
+    calls: list[str] = []
+
+    def junk(model, user_prompt, config):
+        calls.append(model)
+        return _Reply("this is not json")
+
+    monkeypatch.setattr(provider, "_call", junk)
+    with pytest.raises(LLMBadResponse):
+        provider.generate_json("sys", "user")
+    assert calls == ["primary-model"]
+
+
+def test_the_reconstruction_records_the_model_that_actually_answered(
+    seeded, monkeypatch
+) -> None:
+    """A report must never name a model that did not write the draft."""
+    provider = FakeProvider({"items": [], "conflicts": [], "missing_information": []})
+    provider.model_used = "backup-model"
+    provider.notes = ["The configured model was unavailable, so backup-model ran."]
+
+    outcome = seeded["service"].run(seeded["project"], provider)
+    latest = seeded["service"].latest(seeded["project"]["id"])
+    assert latest["model_name"] == "backup-model"
+    assert any("backup-model" in note for note in outcome.notes)

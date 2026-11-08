@@ -108,7 +108,9 @@ def ensure_directories() -> None:
 # --------------------------------------------------------------------------
 
 DEFAULT_LLM_PROVIDER = "gemini"
-DEFAULT_LLM_MODEL = "gemini-2.5-flash"
+#: Verified working end to end against the live API. Google retires models,
+#: so this is overridable with LLM_MODEL and the 404 handler says as much.
+DEFAULT_LLM_MODEL = "gemini-3.6-flash"
 
 
 @dataclass(frozen=True)

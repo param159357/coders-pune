@@ -160,10 +160,19 @@ Community Cloud with its Secrets UI.
 |---|---|---|---|
 | `LLM_PROVIDER` | no | `gemini` | Which provider to call |
 | `LLM_API_KEY` | for AI features | — | Provider API key |
-| `LLM_MODEL` | no | `gemini-2.5-flash` | Model identifier |
+| `LLM_MODEL` | no | `gemini-3.6-flash` | Model identifier |
 | `LLM_BASE_URL` | no | — | Override the provider endpoint |
 | `TRACE_DB_PATH` | no | `data/trace.db` | SQLite file location |
 | `TRACE_MAX_UPLOAD_MB` | no | `10` | Per-file upload ceiling |
+
+Google retires models over time — `gemini-2.5-flash` already returns *"no
+longer available to new users"*. If you hit that, list what your key can use
+and set `LLM_MODEL` accordingly:
+
+```bash
+curl -s "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200" \
+  -H "x-goog-api-key: $LLM_API_KEY" | grep '"name"'
+```
 
 **The app starts and runs without an API key.** It shows a clear "Not
 configured" state and simply does not offer AI reconstruction. No output is ever
@@ -172,6 +181,28 @@ presented as having come from a live model when it did not.
 **Never commit a key.** `.env` and `.streamlit/secrets.toml` are gitignored. If a
 key is ever committed by accident, rotate it — deleting the line is not enough,
 because the value stays in git history.
+
+### Reliability of the model call
+
+Three things were added after watching the real API misbehave during
+development, each for a reason worth stating:
+
+- **Model reasoning is disabled** (`thinking_budget=0`). Gemini 3.x reasons
+  before answering by default, and the thinking tokens come out of the same
+  output budget. On the CampusConnect demo, thinking enabled returned a
+  truncated 2.4 KB reply in 27.8 s; disabled, a complete 12.5 KB reply in
+  11.3 s. Reconstruction is structured extraction with exact quoting, not open
+  reasoning, so the reasoning was costing output and buying nothing.
+- **Bounded retries** (3 attempts, 2 s then 5 s) on availability failures
+  only. A rejected key, a retired model, or an unparseable reply are
+  permanent and fail immediately.
+- **A model fallback chain.** Google's shared capacity returned 502 or 503
+  often enough to fail 2 of 4 live runs during development. If the configured
+  model stays unavailable, TRACE tries `gemini-3.5-flash`, then
+  `gemini-flash-latest`, then `gemini-3.1-flash-lite`. The model that actually
+  produced the draft is recorded on the reconstruction and shown in the
+  report, so a handover never names a model that did not write it, and the
+  substitution is disclosed in the run notes rather than hidden.
 
 ## 7. Running the app
 
@@ -270,7 +301,7 @@ means the tests were actually executed and the app was actually run.
 |---|---|
 | 1 — Foundation: schema, project create/list, dashboard | **Done, verified** |
 | 2 — Document ingestion: upload, validation, extraction | **Done, verified** |
-| 3 — AI reconstruction: provider, schemas, evidence checking | **Done** (live Gemini call not yet verified — see limitations) |
+| 3 — AI reconstruction: provider, schemas, evidence checking | **Done, verified against the live Gemini API** |
 | 4 — Review: edit, approve, reject, evidence inspection | **Done, verified** |
 | 5 — Export: Markdown and PDF handover report | **Done, verified** |
 | 6 — CampusConnect demo and end-to-end test | **Done, verified** |
@@ -298,10 +329,6 @@ Stated plainly, because an honest limitation is worth more than an overclaim.
   but a lightly edited near-duplicate is not.
 - **No external integrations.** Slack, GitHub, Teams, and email ingestion are
   not implemented.
-- **The live Gemini call has not been exercised yet.** The provider, its error
-  handling, and the whole pipeline are covered by tests using a fake provider,
-  and the offline path runs the identical validation and verification code. The
-  real HTTP call to Gemini still needs one run against a real key.
 - **Evidence matching is exact, not semantic.** A quotation must occur in the
   source after whitespace and case are normalised. A correctly paraphrased
   claim is therefore marked unsupported rather than accepted — a deliberate
@@ -311,8 +338,9 @@ Stated plainly, because an honest limitation is worth more than an overclaim.
 ## 12. AI assistance and external services
 
 - Built with **Claude Code** (Claude Opus 5) acting on a written specification.
-- Knowledge reconstruction calls the **Google Gemini** API at runtime; the key
-  is supplied by the operator and is never committed.
+- Knowledge reconstruction calls the **Google Gemini** API at runtime
+  (`gemini-3.6-flash` by default); the key is supplied by the operator and is
+  never committed.
 - No other external service receives document content.
 
 ## 13. Security and privacy notes

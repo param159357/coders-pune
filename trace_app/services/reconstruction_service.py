@@ -210,7 +210,11 @@ class ReconstructionService:
                 )
                 return ReconstructionOutcome(ok=False, message=str(exc))
             notes.extend(batch_notes)
-            model_provider, model_name = settings.provider, settings.model
+            # Record the model that actually answered, which may be a
+            # fallback, so a report never names a model that did not write it.
+            model_provider = settings.provider
+            model_name = getattr(provider, "model_used", None) or settings.model
+            notes.extend(getattr(provider, "notes", []) or [])
 
         # --- verification: nothing below trusts what produced the draft ---
         report = VerificationReport()
