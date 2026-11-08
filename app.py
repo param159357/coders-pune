@@ -23,6 +23,13 @@ from trace_app.services.document_service import DocumentService, extraction_summ
 from trace_app.services.extraction_service import segments_from_json
 from trace_app.services.project_service import ProjectService, ValidationError
 from trace_app.services.reconstruction_service import ReconstructionService
+from trace_app.services.report_service import (
+    ReportOptions,
+    build_markdown,
+    build_pdf,
+    collect_report_data,
+    report_filename,
+)
 from trace_app.services.review_service import (
     ReviewError,
     ReviewService,
@@ -33,7 +40,8 @@ from trace_app.utils.file_validation import human_size
 PAGE_DASHBOARD = "Dashboard"
 PAGE_WORKSPACE = "Project Workspace"
 PAGE_REVIEW = "Review Handover"
-NAV_PAGES = [PAGE_DASHBOARD, PAGE_WORKSPACE, PAGE_REVIEW]
+PAGE_EXPORT = "Export"
+NAV_PAGES = [PAGE_DASHBOARD, PAGE_WORKSPACE, PAGE_REVIEW, PAGE_EXPORT]
 
 
 # --------------------------------------------------------------------------
@@ -893,6 +901,138 @@ def _render_review(service: ProjectService) -> None:
 
 
 # --------------------------------------------------------------------------
+# Export
+# --------------------------------------------------------------------------
+
+def _render_export(service: ProjectService) -> None:
+    project_id = st.session_state.get("project_id")
+    if not project_id:
+        st.markdown("# Export")
+        st.info("Open a project from the Dashboard to export its handover.")
+        return
+
+    try:
+        project = service.require_project(project_id)
+    except ValidationError as exc:
+        st.error(str(exc))
+        return
+
+    reconstructions = _reconstruction_service()
+    reviews = _review_service()
+    latest = reconstructions.latest(project_id)
+
+    st.markdown("# Export")
+    st.markdown(
+        f'<div class="trace-card-desc">{html.escape(project["name"])}</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(ui.divider(), unsafe_allow_html=True)
+
+    if latest is None or str(latest["status"]) != ReconstructionStatus.DRAFT_READY:
+        st.info(
+            "There is nothing to export yet. Run a reconstruction and review "
+            "the result first."
+        )
+        return
+
+    progress = reviews.progress(latest["id"])
+    stats = st.columns(3)
+    with stats[0]:
+        st.markdown(
+            ui.meta_block("Approved (exported)", str(progress.approved)),
+            unsafe_allow_html=True,
+        )
+    with stats[1]:
+        st.markdown(
+            ui.meta_block("Awaiting review", str(progress.proposed)),
+            unsafe_allow_html=True,
+        )
+    with stats[2]:
+        st.markdown(
+            ui.meta_block("Rejected (never exported)", str(progress.rejected)),
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(ui.divider(), unsafe_allow_html=True)
+    st.markdown("### What to include")
+    include_unreviewed = st.checkbox(
+        "Also include items still awaiting review",
+        value=False,
+        help=(
+            "Off by default. When on, unreviewed items appear in a separate "
+            "section and every one is marked [UNREVIEWED]."
+        ),
+    )
+    include_evidence = st.checkbox(
+        "Include evidence references for each claim", value=True
+    )
+
+    if include_unreviewed and progress.proposed:
+        st.warning(
+            f"{progress.proposed} item(s) nobody has approved will be included "
+            "in a clearly marked section. Rejected items are still excluded."
+        )
+    if progress.approved == 0 and not include_unreviewed:
+        st.info(
+            "No item has been approved yet, so the report will say so rather "
+            "than contain claims. Approve items on the Review Handover screen "
+            "first."
+        )
+
+    options = ReportOptions(
+        include_unreviewed=include_unreviewed, include_evidence=include_evidence
+    )
+    data = collect_report_data(
+        project=project,
+        reconstruction=latest,
+        items=reviews.list_items(latest["id"]),
+        missing_information=reconstructions.missing_information(latest),
+        options=options,
+    )
+
+    try:
+        markdown = build_markdown(data, options)
+    except Exception:  # pragma: no cover - defensive
+        st.error("The handover report could not be generated.")
+        return
+
+    st.markdown(ui.divider(), unsafe_allow_html=True)
+    st.markdown("### Download")
+    st.markdown(
+        f'<div class="trace-note">{data.included_count} item(s) will be '
+        f"included. {data.rejected_count} rejected item(s) are excluded.</div>",
+        unsafe_allow_html=True,
+    )
+
+    downloads = st.columns(2)
+    with downloads[0]:
+        st.download_button(
+            "Download Markdown",
+            data=markdown.encode("utf-8"),
+            file_name=report_filename(project["name"], "md"),
+            mime="text/markdown",
+            width="stretch",
+        )
+    with downloads[1]:
+        try:
+            pdf_bytes = build_pdf(data, options)
+        except Exception:  # pragma: no cover - defensive
+            st.error("The PDF could not be generated. The Markdown export still works.")
+        else:
+            st.download_button(
+                "Download PDF",
+                data=pdf_bytes,
+                file_name=report_filename(project["name"], "pdf"),
+                mime="application/pdf",
+                type="primary",
+                width="stretch",
+            )
+
+    with st.expander("Preview the report"):
+        st.markdown(markdown)
+
+
+# --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
 
@@ -921,6 +1061,8 @@ def main() -> None:
         _render_workspace(service)
     elif page == PAGE_REVIEW:
         _render_review(service)
+    elif page == PAGE_EXPORT:
+        _render_export(service)
     else:
         _render_dashboard(service)
 
