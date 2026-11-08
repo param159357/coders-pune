@@ -5,9 +5,10 @@
 TRACE turns scattered project records into a source-backed, reviewable handover
 so the next person can continue work without guessing.
 
-> **Build status:** this repository is under active development. The section
-> [Implementation status](#implementation-status) states exactly what is built
-> and tested right now. Nothing is listed as working unless it has been run.
+> **Honesty note:** the section [Implementation status](#9-implementation-status)
+> states exactly what is built and verified, and
+> [Current limitations](#10-current-limitations) states what is not. Nothing is
+> listed as working unless it was actually run.
 
 ---
 
@@ -180,6 +181,33 @@ streamlit run app.py
 
 Then open <http://localhost:8501>.
 
+### The demo workflow
+
+On the dashboard, press **Load the CampusConnect demo**. This creates a
+synthetic project and uploads its four source documents through the ordinary
+upload path, so what you see is the real extraction pipeline, not a staged
+result. Then:
+
+1. **Project Workspace** — check the extraction status of each source and
+   preview its text with the page or paragraph labels TRACE recorded.
+2. Press **Run reconstruction**.
+3. **Review Handover** — items appear grouped by category. Open *Evidence* on
+   any item to see the source, the location, the exact excerpt, and whether
+   that excerpt was verified against the source.
+4. Edit an item, approve some, reject one. Note that nothing is approved for
+   you.
+5. **Export** — download the handover as Markdown or PDF. Only approved items
+   are included.
+
+Two things worth checking deliberately, because they are the point of the
+product:
+
+- No source states a launch date or an owner for the accessibility review.
+  TRACE reports their absence instead of inventing them.
+- `meeting_notes.txt` records an agreed event capacity of 500 and
+  `development_status.txt` records an implemented limit of 300. Both are
+  surfaced; TRACE does not pick a winner.
+
 ## 8. Running the tests
 
 ```bash
@@ -189,7 +217,51 @@ python -m pytest tests/ -v          # per-test detail
 
 Tests use temporary SQLite files and never touch `data/trace.db`.
 
-## 9. Implementation status
+## 9. Deployment
+
+### Streamlit Community Cloud
+
+1. Push this repository to GitHub.
+2. At <https://share.streamlit.io>, create an app pointing at this repository
+   with `app.py` as the entry point.
+3. Open **Settings → Secrets** and add:
+
+   ```toml
+   LLM_PROVIDER = "gemini"
+   LLM_API_KEY  = "your-real-key"
+   LLM_MODEL    = "gemini-2.5-flash"
+   ```
+
+4. Deploy, then open the public URL in a fresh browser session (or a private
+   window) and complete the demo workflow above to confirm a visitor can use
+   it without any local setup.
+
+**No secret belongs in the repository.** `.env` and `.streamlit/secrets.toml`
+are gitignored. If a key is ever committed, rotate it — removing the line does
+not remove it from git history.
+
+### A note on storage
+
+Streamlit Community Cloud does not guarantee a persistent disk. The SQLite
+database and uploaded files live in `data/`, which can be lost when the
+container restarts. TRACE therefore does **not** promise durable storage. The
+demo is loaded on request rather than seeded on startup, so a restart never
+silently discards work a visitor created — it just means they start again.
+
+If durable storage matters, deploy somewhere with a real attached volume and
+point `TRACE_DB_PATH` and `TRACE_UPLOAD_DIR` at it.
+
+### Before deploying
+
+- Install from `requirements.txt` in a clean environment and confirm the app
+  starts.
+- Run `python -m pytest tests/ -q`.
+- Confirm no developer-only absolute path is required (there are none; all
+  paths derive from `config.PROJECT_ROOT`).
+- Confirm `sample_data/` is present so the demo button works.
+- Confirm no key or private file is exposed by `git ls-files`.
+
+## 10. Implementation status
 
 This table is updated as each milestone is finished and verified. "Verified"
 means the tests were actually executed and the app was actually run.
@@ -201,11 +273,15 @@ means the tests were actually executed and the app was actually run.
 | 3 — AI reconstruction: provider, schemas, evidence checking | **Done** (live Gemini call not yet verified — see limitations) |
 | 4 — Review: edit, approve, reject, evidence inspection | **Done, verified** |
 | 5 — Export: Markdown and PDF handover report | **Done, verified** |
-| 6 — CampusConnect demo, end-to-end test, deployment | Not started |
+| 6 — CampusConnect demo and end-to-end test | **Done, verified** |
+| 6 — Public deployment | **Not done** — needs a Gemini key and a deploy |
 
-## 10. Current limitations
+## 11. Current limitations
 
 Stated plainly, because an honest limitation is worth more than an overclaim.
+
+- **Not deployed yet.** There is no public URL. Everything below has been
+  verified locally only.
 
 - **Single-user demo.** There is no authentication, no user accounts, and no
   role-based access control. Anyone who can open the app can see every project
@@ -232,14 +308,14 @@ Stated plainly, because an honest limitation is worth more than an overclaim.
   choice to fail safe.
 - Further limitations are added here as later milestones land.
 
-## 11. AI assistance and external services
+## 12. AI assistance and external services
 
 - Built with **Claude Code** (Claude Opus 5) acting on a written specification.
 - Knowledge reconstruction calls the **Google Gemini** API at runtime; the key
   is supplied by the operator and is never committed.
 - No other external service receives document content.
 
-## 12. Security and privacy notes
+## 13. Security and privacy notes
 
 - Use synthetic, public, anonymised, or explicitly permissioned files only.
 - Do not upload confidential material to a public demo.
@@ -251,7 +327,7 @@ Stated plainly, because an honest limitation is worth more than an overclaim.
 - Secrets, local databases, and uploaded files are excluded from version
   control.
 
-## 13. Planned Round 3 improvements
+## 14. Planned Round 3 improvements
 
 Planned, **not** implemented in Round 2:
 

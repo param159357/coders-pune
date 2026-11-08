@@ -19,6 +19,7 @@ from trace_app.models import (
     ReconstructionStatus,
     format_timestamp,
 )
+from trace_app.services.demo_service import DemoService
 from trace_app.services.document_service import DocumentService, extraction_summary
 from trace_app.services.extraction_service import segments_from_json
 from trace_app.services.project_service import ProjectService, ValidationError
@@ -71,6 +72,10 @@ def _reconstruction_service() -> ReconstructionService:
 
 def _review_service() -> ReviewService:
     return ReviewService(_database())
+
+
+def _demo_service() -> DemoService:
+    return DemoService(_database())
 
 
 def _goto(page: str, project_id: str | None = None) -> None:
@@ -213,6 +218,8 @@ def _render_dashboard(service: ProjectService) -> None:
 
     if flash := st.session_state.pop("flash", None):
         st.success(flash)
+    if warn := st.session_state.pop("flash_warn", None):
+        st.warning(warn)
 
     try:
         projects = service.list_projects()
@@ -240,6 +247,32 @@ def _render_dashboard(service: ProjectService) -> None:
 
     with creator:
         _render_create_project_form(service)
+        _render_demo_loader()
+
+
+def _render_demo_loader() -> None:
+    demo = _demo_service()
+    if not demo.available():
+        return
+
+    st.markdown(ui.divider(), unsafe_allow_html=True)
+    st.markdown("### Try the demo")
+    st.markdown(
+        '<div class="trace-note">Loads <strong>CampusConnect</strong>, a '
+        "fictional campus events portal, with four synthetic source documents. "
+        "It describes no real institution. Nothing you have created is changed "
+        "or removed.</div>",
+        unsafe_allow_html=True,
+    )
+    if st.button("Load the CampusConnect demo", width="stretch"):
+        with st.spinner("Creating the demo project and extracting its sources…"):
+            result = demo.load()
+        if not result.ok:
+            st.session_state["flash_warn"] = result.message
+            st.rerun()
+        else:
+            st.session_state["flash"] = result.message
+            _goto(PAGE_WORKSPACE, result.project["id"])
 
 
 # --------------------------------------------------------------------------
