@@ -23,11 +23,17 @@ from trace_app.services.document_service import DocumentService, extraction_summ
 from trace_app.services.extraction_service import segments_from_json
 from trace_app.services.project_service import ProjectService, ValidationError
 from trace_app.services.reconstruction_service import ReconstructionService
+from trace_app.services.review_service import (
+    ReviewError,
+    ReviewService,
+    needs_attention,
+)
 from trace_app.utils.file_validation import human_size
 
 PAGE_DASHBOARD = "Dashboard"
 PAGE_WORKSPACE = "Project Workspace"
-NAV_PAGES = [PAGE_DASHBOARD, PAGE_WORKSPACE]
+PAGE_REVIEW = "Review Handover"
+NAV_PAGES = [PAGE_DASHBOARD, PAGE_WORKSPACE, PAGE_REVIEW]
 
 
 # --------------------------------------------------------------------------
@@ -53,6 +59,10 @@ def _document_service() -> DocumentService:
 
 def _reconstruction_service() -> ReconstructionService:
     return ReconstructionService(_database())
+
+
+def _review_service() -> ReviewService:
+    return ReviewService(_database())
 
 
 def _goto(page: str, project_id: str | None = None) -> None:
@@ -595,6 +605,294 @@ def _render_sources_section(project: dict) -> None:
 
 
 # --------------------------------------------------------------------------
+# Review handover
+# --------------------------------------------------------------------------
+
+_FILTER_ALL = "All items"
+_FILTER_UNREVIEWED = "Awaiting review"
+_FILTER_ATTENTION = "Needs a closer look"
+_FILTER_APPROVED = "Approved"
+
+
+def _render_evidence_block(item: dict) -> None:
+    """Show the sources behind an item, verified and unverified alike."""
+    evidence = item.get("evidence") or []
+    if not evidence:
+        st.markdown(
+            '<div class="trace-note">No source evidence is attached to this '
+            "item, so it is recorded as unsupported.</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    verified = sum(1 for row in evidence if row["verified"])
+    with st.expander(
+        f"Evidence ({verified} of {len(evidence)} verified against the sources)"
+    ):
+        for row in evidence:
+            tone = "positive" if row["verified"] else "negative"
+            state = "Verified in source" if row["verified"] else "Not found in source"
+            location = row.get("location_label") or "location not recorded"
+            st.markdown(
+                ui.pill(state, tone)
+                + f'<span class="trace-note" style="margin-left:0.6rem">'
+                f"{html.escape(str(row['source_display_name']))} &middot; "
+                f"{html.escape(str(location))}</span>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                '<div class="trace-note" style="margin:0.4rem 0 0.2rem;'
+                "padding:0.55rem 0.75rem;background:#F7F9FB;"
+                'border-left:3px solid #C4DAE8;border-radius:3px">'
+                f"&ldquo;{html.escape(str(row['excerpt']))}&rdquo;</div>",
+                unsafe_allow_html=True,
+            )
+            if row.get("support_note"):
+                st.markdown(
+                    f'<div class="trace-note" style="margin-bottom:0.8rem;'
+                    f'color:#8C2F2F">{html.escape(str(row["support_note"]))}</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div style="margin-bottom:0.8rem"></div>', unsafe_allow_html=True
+                )
+
+
+def _render_review_item(item: dict, reconstruction_id: str) -> None:
+    reviews = _review_service()
+    item_id = item["id"]
+
+    with st.container(border=True):
+        st.markdown(
+            ui.evidence_pill(item["evidence_status"])
+            + " "
+            + ui.review_pill(item["review_status"])
+            + (
+                '<span class="trace-note" style="margin-left:0.6rem">'
+                "Worth checking before approval</span>"
+                if needs_attention(item)
+                and item["review_status"] == "proposed"
+                else ""
+            ),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div style="margin:0.55rem 0 0.35rem;font-size:0.97rem;'
+            f'line-height:1.5">{html.escape(str(item["text"]))}</div>',
+            unsafe_allow_html=True,
+        )
+
+        if item.get("owner") or item.get("due_date"):
+            bits = []
+            if item.get("owner"):
+                bits.append(f"Owner: {item['owner']}")
+            if item.get("due_date"):
+                bits.append(f"Due: {item['due_date']}")
+            st.markdown(
+                f'<div class="trace-note">{html.escape(" · ".join(bits))}</div>',
+                unsafe_allow_html=True,
+            )
+
+        if item.get("reviewer_note"):
+            st.markdown(
+                f'<div class="trace-note" style="margin-top:0.3rem">'
+                f"<strong>Note:</strong> {html.escape(str(item['reviewer_note']))}"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+        _render_evidence_block(item)
+
+        with st.expander("Edit this item or add a note"):
+            new_text = st.text_area(
+                "Statement",
+                value=str(item["text"]),
+                key=f"text_{item_id}",
+                height=90,
+            )
+            new_note = st.text_input(
+                "Reviewer note",
+                value=str(item.get("reviewer_note") or ""),
+                key=f"note_{item_id}",
+                placeholder="Why this was changed, kept, or rejected",
+            )
+            if st.button("Save changes", key=f"save_{item_id}"):
+                try:
+                    reviews.edit_text(item_id, reconstruction_id, new_text)
+                    reviews.set_note(item_id, reconstruction_id, new_note)
+                except ReviewError as exc:
+                    st.session_state["review_warn"] = str(exc)
+                else:
+                    st.session_state["review_flash"] = "Item updated."
+                st.rerun()
+
+            history = reviews.history(item_id)
+            if history:
+                st.markdown(
+                    '<div class="trace-meta-label" style="margin-top:0.7rem">'
+                    "Review history</div>",
+                    unsafe_allow_html=True,
+                )
+                for event in history:
+                    st.markdown(
+                        f'<div class="trace-note">{html.escape(format_timestamp(event["created_at"]))}'
+                        f" — {html.escape(str(event['action']))}"
+                        + (
+                            f": {html.escape(str(event['note']))}"
+                            if event.get("note")
+                            else ""
+                        )
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
+
+        approve_col, reject_col, reopen_col, _ = st.columns([1, 1, 1, 2.6])
+        status = str(item["review_status"])
+        with approve_col:
+            if st.button(
+                "Approve",
+                key=f"ok_{item_id}",
+                disabled=status == "approved",
+                width="stretch",
+            ):
+                reviews.approve(item_id, reconstruction_id)
+                st.rerun()
+        with reject_col:
+            if st.button(
+                "Reject",
+                key=f"no_{item_id}",
+                disabled=status == "rejected",
+                width="stretch",
+            ):
+                reviews.reject(item_id, reconstruction_id)
+                st.rerun()
+        with reopen_col:
+            if st.button(
+                "Reopen",
+                key=f"re_{item_id}",
+                disabled=status == "proposed",
+                width="stretch",
+            ):
+                reviews.reopen(item_id, reconstruction_id)
+                st.rerun()
+
+
+def _passes_filter(item: dict, choice: str) -> bool:
+    if choice == _FILTER_UNREVIEWED:
+        return item["review_status"] == "proposed"
+    if choice == _FILTER_APPROVED:
+        return item["review_status"] == "approved"
+    if choice == _FILTER_ATTENTION:
+        return needs_attention(item)
+    return True
+
+
+def _render_review(service: ProjectService) -> None:
+    project_id = st.session_state.get("project_id")
+    if not project_id:
+        st.markdown("# Review Handover")
+        st.info("Open a project from the Dashboard to review its handover.")
+        return
+
+    try:
+        project = service.require_project(project_id)
+    except ValidationError as exc:
+        st.error(str(exc))
+        return
+
+    reconstructions = _reconstruction_service()
+    reviews = _review_service()
+    latest = reconstructions.latest(project_id)
+
+    st.markdown(f"# Review Handover")
+    st.markdown(
+        f'<div class="trace-card-desc">{html.escape(project["name"])}</div>',
+        unsafe_allow_html=True,
+    )
+
+    if latest is None or str(latest["status"]) != ReconstructionStatus.DRAFT_READY:
+        st.markdown(ui.divider(), unsafe_allow_html=True)
+        st.info(
+            "There is no draft to review yet. Run a reconstruction from the "
+            "Project Workspace first."
+        )
+        return
+
+    if latest["is_demo_preview"]:
+        st.warning(
+            "This draft was produced by deterministic keyword matching, not by "
+            "an AI model. It quotes sentences containing category cue words and "
+            "makes no judgement about them."
+        )
+
+    progress = reviews.progress(latest["id"])
+    st.markdown(ui.divider(), unsafe_allow_html=True)
+
+    stats = st.columns(4)
+    with stats[0]:
+        st.markdown(ui.meta_block("Proposed", str(progress.total)), unsafe_allow_html=True)
+    with stats[1]:
+        st.markdown(ui.meta_block("Approved", str(progress.approved)), unsafe_allow_html=True)
+    with stats[2]:
+        st.markdown(ui.meta_block("Rejected", str(progress.rejected)), unsafe_allow_html=True)
+    with stats[3]:
+        st.markdown(
+            ui.meta_block("Awaiting review", str(progress.proposed)),
+            unsafe_allow_html=True,
+        )
+
+    if progress.total:
+        st.progress(progress.fraction)
+    if progress.proposed:
+        st.markdown(
+            f'<div class="trace-note">{progress.proposed} item(s) still need a '
+            "decision. Only approved items are exported.</div>",
+            unsafe_allow_html=True,
+        )
+    elif progress.total:
+        st.markdown(
+            '<div class="trace-note">Every item has been reviewed.</div>',
+            unsafe_allow_html=True,
+        )
+
+    missing = reconstructions.missing_information(latest)
+    if missing:
+        with st.expander(f"Missing information noted by this run ({len(missing)})"):
+            for entry in missing:
+                st.markdown(
+                    f'<div class="trace-note" style="margin-bottom:0.45rem">• '
+                    f"{html.escape(entry)}</div>",
+                    unsafe_allow_html=True,
+                )
+
+    if warn := st.session_state.pop("review_warn", None):
+        st.warning(warn)
+    if flash := st.session_state.pop("review_flash", None):
+        st.success(flash)
+
+    st.markdown(ui.divider(), unsafe_allow_html=True)
+    choice = st.radio(
+        "Show",
+        [_FILTER_ALL, _FILTER_UNREVIEWED, _FILTER_ATTENTION, _FILTER_APPROVED],
+        horizontal=True,
+    )
+
+    shown = 0
+    for _, label, items in reviews.grouped_items(latest["id"]):
+        visible = [item for item in items if _passes_filter(item, choice)]
+        if not visible:
+            continue
+        shown += len(visible)
+        st.markdown(f"## {label}")
+        for item in visible:
+            _render_review_item(item, latest["id"])
+
+    if shown == 0:
+        st.info("No items match this filter.")
+
+
+# --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
 
@@ -621,6 +919,8 @@ def main() -> None:
     page = _render_sidebar()
     if page == PAGE_WORKSPACE:
         _render_workspace(service)
+    elif page == PAGE_REVIEW:
+        _render_review(service)
     else:
         _render_dashboard(service)
 

@@ -93,7 +93,8 @@ coders-pune/
 │   │   ├── document_service.py       # Upload orchestration and deletion
 │   │   ├── extraction_service.py     # PDF/DOCX/TXT text + location extraction
 │   │   ├── evidence_service.py       # Verifies every citation against sources
-│   │   └── reconstruction_service.py # The reconstruction pipeline
+│   │   ├── reconstruction_service.py # The reconstruction pipeline
+│   │   └── review_service.py         # Edit, approve, reject, audit trail
 │   └── utils/
 │       ├── file_validation.py    # Type, size, magic-byte checks; safe paths
 │       └── text_chunking.py      # Deterministic chunking with overlap
@@ -197,7 +198,7 @@ means the tests were actually executed and the app was actually run.
 | 1 — Foundation: schema, project create/list, dashboard | **Done, verified** |
 | 2 — Document ingestion: upload, validation, extraction | **Done, verified** |
 | 3 — AI reconstruction: provider, schemas, evidence checking | **Done** (live Gemini call not yet verified — see limitations) |
-| 4 — Review: edit, approve, reject, evidence inspection | Not started |
+| 4 — Review: edit, approve, reject, evidence inspection | **Done, verified** |
 | 5 — Export: Markdown and PDF handover report | Not started |
 | 6 — CampusConnect demo, end-to-end test, deployment | Not started |
 
