@@ -83,8 +83,12 @@ coders-pune/
 ├── trace_app/
 │   ├── models.py              # Status enums, display labels, ID/time helpers
 │   ├── ui.py                  # Theme, status pills, shared presentation
-│   └── services/
-│       └── project_service.py # Project validation and retrieval
+│   ├── services/
+│   │   ├── project_service.py    # Project validation and retrieval
+│   │   ├── document_service.py   # Upload orchestration and deletion
+│   │   └── extraction_service.py # PDF/DOCX/TXT text + location extraction
+│   └── utils/
+│       └── file_validation.py    # Type, size, magic-byte checks; safe paths
 └── tests/                     # pytest suite
 ```
 
@@ -154,7 +158,7 @@ means the tests were actually executed and the app was actually run.
 | Milestone | Status |
 |---|---|
 | 1 — Foundation: schema, project create/list, dashboard | **Done, verified** |
-| 2 — Document ingestion: upload, validation, extraction | Not started |
+| 2 — Document ingestion: upload, validation, extraction | **Done, verified** |
 | 3 — AI reconstruction: provider, schemas, evidence checking | Not started |
 | 4 — Review: edit, approve, reject, evidence inspection | Not started |
 | 5 — Export: Markdown and PDF handover report | Not started |
@@ -171,7 +175,12 @@ Stated plainly, because an honest limitation is worth more than an overclaim.
   a persistent disk. Data can be lost when the container restarts. TRACE does
   not promise long-term persistence.
 - **No OCR.** An image-only or scanned PDF yields no text, and TRACE reports it
-  as such rather than claiming a successful extraction.
+  as `No text found` rather than claiming a successful extraction.
+- **Upload ceiling of 10 MB per file**, configurable via `TRACE_MAX_UPLOAD_MB`.
+  Only `.pdf`, `.docx`, and `.txt` are accepted; the declared extension is not
+  trusted on its own, as the leading bytes are checked too.
+- **Deduplication is byte-exact.** Two files with identical content are caught,
+  but a lightly edited near-duplicate is not.
 - **No external integrations.** Slack, GitHub, Teams, and email ingestion are
   not implemented.
 - Further limitations are added here as later milestones land.

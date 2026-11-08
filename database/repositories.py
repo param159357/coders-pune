@@ -113,3 +113,128 @@ class ProjectRepository:
                 "UPDATE projects SET updated_at = ? WHERE id = ?",
                 (utc_now(), project_id),
             )
+
+
+class SourceRepository:
+    """Create and read uploaded source documents.
+
+    Every read that returns source rows is scoped by ``project_id``, so a
+    caller cannot reach another project's sources even with a valid source ID.
+    """
+
+    #: Columns returned when the (potentially large) extracted text is not
+    #: needed, which keeps list screens cheap.
+    _SUMMARY_COLUMNS = (
+        "id, project_id, display_name, stored_name, file_type, file_size,"
+        " uploaded_at, extraction_status, extraction_error, extraction_notes,"
+        " char_count, page_count, content_hash"
+    )
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def create(
+        self,
+        project_id: str,
+        display_name: str,
+        stored_name: str,
+        file_type: str,
+        file_size: int,
+        extraction_status: str,
+        extracted_text: str | None = None,
+        extraction_error: str | None = None,
+        extraction_notes: str | None = None,
+        segments_json: str | None = None,
+        char_count: int = 0,
+        page_count: int | None = None,
+        content_hash: str | None = None,
+        source_id: str | None = None,
+    ) -> dict[str, Any]:
+        new_source_id = source_id or new_id("src")
+        with transaction(self._connection):
+            self._connection.execute(
+                "INSERT INTO sources (id, project_id, display_name, stored_name,"
+                " file_type, file_size, uploaded_at, extraction_status,"
+                " extraction_error, extraction_notes, extracted_text,"
+                " segments_json, char_count, page_count, content_hash)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_source_id,
+                    project_id,
+                    display_name,
+                    stored_name,
+                    file_type,
+                    file_size,
+                    utc_now(),
+                    str(extraction_status),
+                    extraction_error,
+                    extraction_notes,
+                    extracted_text,
+                    segments_json,
+                    char_count,
+                    page_count,
+                    content_hash,
+                ),
+            )
+        stored = self.get(new_source_id, project_id)
+        if stored is None:  # pragma: no cover - would indicate a failed insert
+            raise RuntimeError("Source insert succeeded but the row is missing")
+        return stored
+
+    def get(self, source_id: str, project_id: str) -> dict[str, Any] | None:
+        """Fetch one source, enforcing that it belongs to ``project_id``."""
+        row = self._connection.execute(
+            "SELECT * FROM sources WHERE id = ? AND project_id = ?",
+            (source_id, project_id),
+        ).fetchone()
+        return _row_to_dict(row)
+
+    def list_for_project(self, project_id: str) -> list[dict[str, Any]]:
+        """Source summaries for a project, oldest first, without the full text."""
+        rows = self._connection.execute(
+            f"SELECT {self._SUMMARY_COLUMNS} FROM sources"
+            " WHERE project_id = ? ORDER BY uploaded_at ASC, rowid ASC",
+            (project_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_usable_for_project(self, project_id: str) -> list[dict[str, Any]]:
+        """Full rows for sources that actually yielded text.
+
+        This is the only set the reconstruction pipeline is allowed to read.
+        """
+        rows = self._connection.execute(
+            "SELECT * FROM sources WHERE project_id = ?"
+            " AND extraction_status IN ('extracted', 'partially_extracted')"
+            " AND extracted_text IS NOT NULL AND TRIM(extracted_text) <> ''"
+            " ORDER BY uploaded_at ASC, rowid ASC",
+            (project_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def find_by_hash(
+        self, project_id: str, content_hash: str
+    ) -> dict[str, Any] | None:
+        """Detect a byte-identical re-upload within the same project."""
+        if not content_hash:
+            return None
+        row = self._connection.execute(
+            f"SELECT {self._SUMMARY_COLUMNS} FROM sources"
+            " WHERE project_id = ? AND content_hash = ? LIMIT 1",
+            (project_id, content_hash),
+        ).fetchone()
+        return _row_to_dict(row)
+
+    def count_for_project(self, project_id: str) -> int:
+        row = self._connection.execute(
+            "SELECT COUNT(*) AS c FROM sources WHERE project_id = ?", (project_id,)
+        ).fetchone()
+        return int(row["c"])
+
+    def delete(self, source_id: str, project_id: str) -> None:
+        """Remove a source. Refused by the database if evidence still cites it."""
+        with transaction(self._connection):
+            self._connection.execute(
+                "DELETE FROM sources WHERE id = ? AND project_id = ?",
+                (source_id, project_id),
+            )

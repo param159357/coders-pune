@@ -41,3 +41,71 @@ def project(project_service: ProjectService) -> dict:
     return project_service.create_project(
         "Test Project", "A project used by the test suite", "SAMURAI"
     )
+
+
+# --------------------------------------------------------------------------
+# Document fixtures
+#
+# Fixtures are generated rather than committed as binaries, so the suite stays
+# reproducible and the repository stays free of opaque test blobs.
+# --------------------------------------------------------------------------
+
+@pytest.fixture()
+def make_pdf(tmp_path: Path):
+    """Build a text PDF. ``pages`` is a list of page body strings."""
+
+    def _make(name: str, pages: list[str], encrypt: bool = False) -> Path:
+        import pymupdf
+
+        document = pymupdf.open()
+        for body in pages:
+            page = document.new_page()
+            if body:
+                page.insert_text((72, 100), body, fontsize=11)
+        path = tmp_path / name
+        if encrypt:
+            document.save(
+                str(path),
+                encryption=pymupdf.PDF_ENCRYPT_AES_256,
+                owner_pw="owner",
+                user_pw="user",
+            )
+        else:
+            document.save(str(path))
+        document.close()
+        return path
+
+    return _make
+
+
+@pytest.fixture()
+def make_docx(tmp_path: Path):
+    def _make(
+        name: str, paragraphs: list[str], table: list[list[str]] | None = None
+    ) -> Path:
+        from docx import Document
+
+        document = Document()
+        for paragraph in paragraphs:
+            document.add_paragraph(paragraph)
+        if table:
+            built = document.add_table(rows=len(table), cols=len(table[0]))
+            for row_index, row in enumerate(table):
+                for column_index, value in enumerate(row):
+                    built.cell(row_index, column_index).text = value
+        path = tmp_path / name
+        document.save(str(path))
+        return path
+
+    return _make
+
+
+@pytest.fixture()
+def isolated_storage(tmp_path: Path, monkeypatch):
+    """Point config's upload directory at a temporary folder."""
+    import config
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config, "UPLOAD_DIR", upload_dir)
+    return upload_dir

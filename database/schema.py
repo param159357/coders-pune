@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 
 #: Bump this and add a matching block in ``_MIGRATIONS`` for every change.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -113,8 +113,16 @@ CREATE INDEX IF NOT EXISTS idx_review_events_item
     ON review_events (handover_item_id);
 """
 
+# Version 2 stores the located segments produced during extraction (page or
+# paragraph level) so evidence can be checked and displayed against the exact
+# region of the source it came from.
+_MIGRATION_2 = """
+ALTER TABLE sources ADD COLUMN segments_json TEXT;
+ALTER TABLE sources ADD COLUMN extraction_notes TEXT;
+"""
+
 #: Ordered migrations. Index 0 takes the database from version 0 to 1.
-_MIGRATIONS = [_MIGRATION_1]
+_MIGRATIONS = [_MIGRATION_1, _MIGRATION_2]
 
 
 def _current_version(connection: sqlite3.Connection) -> int:

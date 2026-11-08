@@ -13,8 +13,11 @@ import config
 from database.connection import DatabaseError, get_connection
 from database.schema import initialise_database
 from trace_app import ui
-from trace_app.models import format_timestamp
+from trace_app.models import ExtractionStatus, format_timestamp
+from trace_app.services.document_service import DocumentService, extraction_summary
+from trace_app.services.extraction_service import segments_from_json
 from trace_app.services.project_service import ProjectService, ValidationError
+from trace_app.utils.file_validation import human_size
 
 PAGE_DASHBOARD = "Dashboard"
 PAGE_WORKSPACE = "Project Workspace"
@@ -36,6 +39,10 @@ def _database():
 
 def _project_service() -> ProjectService:
     return ProjectService(_database())
+
+
+def _document_service() -> DocumentService:
+    return DocumentService(_database())
 
 
 def _goto(page: str, project_id: str | None = None) -> None:
@@ -258,11 +265,195 @@ def _render_workspace(service: ProjectService) -> None:
         )
 
     st.markdown(ui.divider(), unsafe_allow_html=True)
-    st.markdown("## Sources")
-    st.info(
-        "Document upload and text extraction are the next milestone and are not "
-        "implemented yet."
+    _render_sources_section(project)
+
+
+# --------------------------------------------------------------------------
+# Sources
+# --------------------------------------------------------------------------
+
+#: How much extracted text the preview shows before truncating.
+_PREVIEW_SEGMENT_LIMIT = 12
+_PREVIEW_CHAR_LIMIT = 900
+
+
+def _render_upload_form(project: dict) -> None:
+    documents = _document_service()
+    st.markdown("### Add sources")
+    st.markdown(
+        f'<div class="trace-note">Accepted: PDF, DOCX, TXT &middot; up to '
+        f"{config.MAX_UPLOAD_MB} MB per file. "
+        f"{html.escape(config.UPLOAD_PRIVACY_WARNING)}</div>",
+        unsafe_allow_html=True,
     )
+
+    # The uploader key is rotated after each successful batch so Streamlit
+    # clears the widget instead of re-submitting the same files on rerun.
+    uploader_key = f"uploader_{project['id']}_{st.session_state.get('upload_round', 0)}"
+    uploaded = st.file_uploader(
+        "Upload documents",
+        type=list(config.ALLOWED_EXTENSIONS),
+        accept_multiple_files=True,
+        key=uploader_key,
+        label_visibility="collapsed",
+    )
+
+    if not uploaded:
+        return
+    if not st.button(
+        f"Add {len(uploaded)} file{'s' if len(uploaded) != 1 else ''}",
+        type="primary",
+        key=f"add_{uploader_key}",
+    ):
+        return
+
+    outcomes = []
+    with st.spinner("Validating and extracting text…"):
+        for item in uploaded:
+            outcomes.append(documents.upload(project["id"], item.name, item.getvalue()))
+
+    st.session_state["upload_round"] = st.session_state.get("upload_round", 0) + 1
+    st.session_state["upload_outcomes"] = [
+        {
+            "accepted": outcome.accepted,
+            "status": outcome.extraction_status,
+            "message": outcome.message,
+        }
+        for outcome in outcomes
+    ]
+    st.rerun()
+
+
+def _render_upload_outcomes() -> None:
+    outcomes = st.session_state.pop("upload_outcomes", None)
+    if not outcomes:
+        return
+    for outcome in outcomes:
+        if not outcome["accepted"]:
+            st.warning(outcome["message"])
+        elif outcome["status"] in (
+            ExtractionStatus.EXTRACTED,
+            ExtractionStatus.PARTIALLY_EXTRACTED,
+        ):
+            st.success(outcome["message"])
+        else:
+            # Stored, but unusable as a source -- say so rather than imply success.
+            st.warning(outcome["message"])
+
+
+def _render_source_row(project: dict, source: dict) -> None:
+    documents = _document_service()
+    status = source.get("extraction_status")
+    name = html.escape(str(source["display_name"]))
+
+    header, action = st.columns([6, 1], vertical_alignment="center")
+    with header:
+        st.markdown(
+            f'<div class="trace-card-title">{name}</div>'
+            '<div class="trace-note" style="margin-top:0.3rem">'
+            + ui.extraction_pill(status)
+            + f'<span style="margin-left:0.6rem">'
+            f"{html.escape(str(source['file_type']).upper())} &middot; "
+            f"{html.escape(human_size(int(source['file_size'])))} &middot; "
+            f"{int(source['char_count']):,} characters"
+            + (
+                f" &middot; {int(source['page_count'])} pages"
+                if source.get("page_count")
+                else ""
+            )
+            + f" &middot; added {html.escape(format_timestamp(source['uploaded_at']))}"
+            "</span></div>",
+            unsafe_allow_html=True,
+        )
+    with action:
+        if st.button("Remove", key=f"del_{source['id']}", width="stretch"):
+            ok, message = documents.delete_source(source["id"], project["id"])
+            st.session_state["flash" if ok else "flash_warn"] = message
+            st.rerun()
+
+    if source.get("extraction_error"):
+        st.warning(source["extraction_error"])
+    if source.get("extraction_notes"):
+        st.info(source["extraction_notes"])
+
+    if int(source["char_count"]) > 0:
+        with st.expander("Preview extracted text with source locations"):
+            full = documents.get_source(source["id"], project["id"]) or {}
+            segments = segments_from_json(full.get("segments_json"))
+            if not segments:
+                st.markdown(
+                    f'<div class="trace-note">{html.escape((full.get("extracted_text") or "")[:_PREVIEW_CHAR_LIMIT])}</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                for segment in segments[:_PREVIEW_SEGMENT_LIMIT]:
+                    body = segment.text[:_PREVIEW_CHAR_LIMIT]
+                    if len(segment.text) > _PREVIEW_CHAR_LIMIT:
+                        body += " …"
+                    st.markdown(
+                        ui.pill(segment.location_label, "info")
+                        + f'<div class="trace-note" style="margin:0.3rem 0 0.9rem">'
+                        f"{html.escape(body)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                if len(segments) > _PREVIEW_SEGMENT_LIMIT:
+                    st.markdown(
+                        f'<div class="trace-note">… and '
+                        f"{len(segments) - _PREVIEW_SEGMENT_LIMIT} further "
+                        "locations not shown in this preview.</div>",
+                        unsafe_allow_html=True,
+                    )
+
+    st.markdown(ui.divider(), unsafe_allow_html=True)
+
+
+def _render_sources_section(project: dict) -> None:
+    documents = _document_service()
+
+    if warn := st.session_state.pop("flash_warn", None):
+        st.warning(warn)
+    _render_upload_outcomes()
+
+    try:
+        sources = documents.list_sources(project["id"])
+    except DatabaseError as exc:
+        st.error(f"Sources could not be loaded: {exc}")
+        return
+
+    summary = extraction_summary(sources)
+    listing, uploader = st.columns([1.65, 1], gap="large")
+
+    with listing:
+        heading = f"## Sources ({summary['total']})" if summary["total"] else "## Sources"
+        st.markdown(heading)
+        if summary["total"]:
+            parts = [f"{summary['usable']} usable for reconstruction"]
+            if summary["no_text"]:
+                parts.append(f"{summary['no_text']} with no extractable text")
+            if summary["failed"]:
+                parts.append(f"{summary['failed']} failed")
+            st.markdown(
+                f'<div class="trace-note" style="margin-bottom:0.9rem">'
+                f"{html.escape(' · '.join(parts))}</div>",
+                unsafe_allow_html=True,
+            )
+
+        if not sources:
+            st.markdown(
+                '<div class="trace-card">'
+                '<div class="trace-card-title">No sources yet</div>'
+                '<div class="trace-card-desc">Upload the project records you are '
+                "authorised to use — briefs, meeting notes, status updates, issue "
+                "lists. TRACE reconstructs the handover only from what you add "
+                "here.</div></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            for source in sources:
+                _render_source_row(project, source)
+
+    with uploader:
+        _render_upload_form(project)
 
 
 # --------------------------------------------------------------------------
