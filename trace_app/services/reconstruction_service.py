@@ -186,6 +186,8 @@ class ReconstructionService:
             except LLMNotConfigured:
                 use_preview = True
 
+        provider_error: str | None = None
+
         if use_preview:
             draft = offline_preview.build_preview(sources)
             notes.append(
@@ -200,21 +202,30 @@ class ReconstructionService:
                     provider, batches, catalogue, str(project["name"])
                 )
             except LLMError as exc:
-                self._reconstructions.create(
-                    project_id=project_id,
-                    status=ReconstructionStatus.FAILED,
-                    model_provider=settings.provider,
-                    model_name=settings.model,
-                    source_count=len(sources),
-                    processing_notes=str(exc),
+                # The provider is unreachable. Rather than leaving the user at a
+                # dead end, fall back to the deterministic matcher -- which is
+                # labelled as not-from-a-model everywhere it appears, and runs
+                # through exactly the same validation and evidence
+                # verification. The provider's own error is kept and shown, so
+                # nobody can mistake this for a successful model run.
+                logger.warning("Falling back to the preview: %s", exc)
+                provider_error = str(exc)
+                use_preview = True
+                draft = offline_preview.build_preview(sources)
+                notes.append(
+                    f"The AI provider could not be reached ({exc}) This draft "
+                    "was produced instead by deterministic keyword matching. "
+                    "No AI model was called."
                 )
-                return ReconstructionOutcome(ok=False, message=str(exc))
-            notes.extend(batch_notes)
-            # Record the model that actually answered, which may be a
-            # fallback, so a report never names a model that did not write it.
-            model_provider = settings.provider
-            model_name = getattr(provider, "model_used", None) or settings.model
-            notes.extend(getattr(provider, "notes", []) or [])
+                model_provider, model_name = PREVIEW_PROVIDER_LABEL, "rule-based"
+            else:
+                notes.extend(batch_notes)
+                # Record the model that actually answered, which may be a
+                # fallback, so a report never names a model that did not write
+                # it.
+                model_provider = settings.provider
+                model_name = getattr(provider, "model_used", None) or settings.model
+                notes.extend(getattr(provider, "notes", []) or [])
 
         # --- verification: nothing below trusts what produced the draft ---
         report = VerificationReport()
@@ -239,11 +250,24 @@ class ReconstructionService:
             model_name=model_name,
             notes=notes,
             is_preview=use_preview,
+            verification={
+                "evidence_total": report.evidence_total,
+                "evidence_verified": report.evidence_verified,
+                "fabricated_source_ids": report.fabricated_source_ids,
+                "excerpt_not_found": report.excerpt_not_found,
+                "locations_corrected": report.locations_corrected,
+                "items_downgraded": report.items_downgraded,
+            },
         )
         self._projects.touch(project_id)
 
         stored = sum(1 for item in verified_items if item.text)
-        if stored == 0:
+        if provider_error:
+            message = (
+                "The AI provider was unavailable, so TRACE produced a clearly "
+                "labelled deterministic draft instead. No AI model was called."
+            )
+        elif stored == 0:
             message = (
                 "The reconstruction completed but produced no items the sources "
                 "support. Nothing was invented to fill the gap."
@@ -335,6 +359,7 @@ class ReconstructionService:
         model_name: str | None,
         notes: list[str],
         is_preview: bool,
+        verification: dict[str, int] | None = None,
     ) -> str:
         """Write the reconstruction, its items, and its verified evidence.
 
@@ -346,6 +371,9 @@ class ReconstructionService:
             "missing_information": list(draft.missing_information),
             "notes": list(notes),
             "is_demo_preview": is_preview,
+            # Structured counts so the review screen can show what was checked
+            # as figures rather than buried prose.
+            "verification": verification,
         }
 
         reconstruction_id = self._reconstructions.create(
@@ -399,6 +427,15 @@ class ReconstructionService:
         for row in rows:
             summary[str(row["evidence_status"])] = int(row["c"])
         return summary
+
+    def verification_counts(self, reconstruction: dict[str, Any]) -> dict[str, int]:
+        """Counts of what evidence checking actually did, for display."""
+        try:
+            payload = json.loads(reconstruction.get("validated_json") or "{}")
+        except (TypeError, ValueError):
+            return {}
+        counts = payload.get("verification")
+        return counts if isinstance(counts, dict) else {}
 
     def missing_information(self, reconstruction: dict[str, Any]) -> list[str]:
         try:

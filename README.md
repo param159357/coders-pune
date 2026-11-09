@@ -182,6 +182,15 @@ presented as having come from a live model when it did not.
 key is ever committed by accident, rotate it — deleting the line is not enough,
 because the value stays in git history.
 
+### If the model is unreachable
+
+A reconstruction never dead-ends. If every configured model stays unavailable,
+TRACE falls back to the deterministic keyword matcher rather than showing an
+error and stopping. That output runs through exactly the same validation and
+evidence verification, and it is labelled as not-from-a-model in the database,
+in the UI, in the run notes and in the exported report — with the provider's
+own error quoted — so it can never be mistaken for a successful model run.
+
 ### Reliability of the model call
 
 Three things were added after watching the real API misbehave during

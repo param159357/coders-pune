@@ -526,6 +526,8 @@ def _render_draft_summary(project: dict, latest: dict) -> None:
         f'<div style="margin:0.45rem 0 0.2rem">{pills}</div>', unsafe_allow_html=True
     )
 
+    _render_verification_panel(latest)
+
     missing = reconstructions.missing_information(latest)
     if missing:
         with st.expander(f"Missing information noted by this run ({len(missing)})"):
@@ -895,6 +897,93 @@ def _render_review_item(item: dict, reconstruction_id: str) -> None:
                 st.rerun()
 
 
+def _render_verification_panel(latest: dict) -> None:
+    """Show what evidence checking actually did.
+
+    This is the product's whole claim -- that a model cannot make an
+    unsupported statement look supported -- so it belongs on the page as
+    figures, not buried in an expander.
+    """
+    counts = _reconstruction_service().verification_counts(latest)
+    if not counts or not counts.get("evidence_total"):
+        return
+
+    total = int(counts.get("evidence_total", 0))
+    verified = int(counts.get("evidence_verified", 0))
+    rejected = int(counts.get("fabricated_source_ids", 0)) + int(
+        counts.get("excerpt_not_found", 0)
+    )
+    downgraded = int(counts.get("items_downgraded", 0))
+    corrected = int(counts.get("locations_corrected", 0))
+
+    st.markdown(
+        '<div class="tr-k" style="margin-top:.5rem">What TRACE checked</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        ui.stats(
+            [
+                ("Citations checked", total),
+                ("Matched the source", verified),
+                ("Rejected", rejected),
+                ("Items downgraded", downgraded),
+            ]
+        ),
+        unsafe_allow_html=True,
+    )
+
+    detail = [
+        f"Every one of the {total} citation(s) the draft produced was checked "
+        "against the text of the source it named."
+    ]
+    if rejected:
+        detail.append(
+            f"{rejected} did not hold up and are not treated as support."
+        )
+    if corrected:
+        detail.append(
+            f"{corrected} location reference(s) were corrected to where the "
+            "quotation actually appears."
+        )
+    if downgraded:
+        detail.append(
+            f"{downgraded} item(s) had their evidence status lowered because "
+            "the evidence did not support the claim as stated."
+        )
+    else:
+        detail.append("No item needed its evidence status lowered in this run.")
+    st.markdown(ui.note(" ".join(detail)), unsafe_allow_html=True)
+
+
+#: Shown on the synthetic demo so a first-time visitor knows what is worth
+#: checking. Each point is something the demo data was built to prove.
+_DEMO_POINTERS = (
+    "<strong>Nothing is invented.</strong> No source states a launch date or "
+    "an owner for the accessibility review. Look under "
+    "<em>Missing information</em> — TRACE reports their absence instead of "
+    "filling the gap.",
+    "<strong>Contradictions are preserved, not resolved.</strong> The meeting "
+    "notes record an agreed event capacity of 500; the development status "
+    "records an implemented limit of 300. Look for the item marked "
+    "<em>Conflicting</em> — both sources are kept and neither is chosen.",
+    "<strong>Citations are verified, not trusted.</strong> Open <em>Evidence</em> "
+    "on any item: each citation names its source and location and shows the "
+    "exact quotation. A quotation that is not in the source is marked "
+    "<em>Not found in source</em> and the claim is downgraded.",
+)
+
+
+def _render_demo_pointers(project: dict) -> None:
+    if not project.get("is_demo"):
+        return
+    with st.expander("What to look for in this demo", expanded=False):
+        for point in _DEMO_POINTERS:
+            st.markdown(
+                f'<div class="tr-desc" style="margin-bottom:.6rem">• {point}</div>',
+                unsafe_allow_html=True,
+            )
+
+
 def _passes_filter(item: dict, choice: str) -> bool:
     if choice == _FILTER_UNREVIEWED:
         return item["review_status"] == "proposed"
@@ -971,6 +1060,10 @@ def _render_review(service: ProjectService) -> None:
             ),
             unsafe_allow_html=True,
         )
+
+    st.markdown(ui.divider(), unsafe_allow_html=True)
+    _render_verification_panel(latest)
+    _render_demo_pointers(project)
 
     missing = reconstructions.missing_information(latest)
     if missing:

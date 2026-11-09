@@ -197,7 +197,11 @@ def test_an_unverifiable_quotation_is_stored_but_marked_unverified(seeded) -> No
 
 
 def test_an_item_with_an_invalid_category_is_discarded(seeded) -> None:
-    """A whole reply full of invalid categories yields no usable draft."""
+    """A reply full of invalid categories yields no usable model draft.
+
+    The run still completes, by falling back to the labelled deterministic
+    matcher, but nothing the model said survives.
+    """
     provider = FakeProvider(
         {
             "items": [
@@ -208,8 +212,9 @@ def test_an_item_with_an_invalid_category_is_discarded(seeded) -> None:
         }
     )
     outcome = seeded["service"].run(seeded["project"], provider)
-    assert not outcome.ok
-    assert "structure" in outcome.message.lower()
+    assert outcome.is_preview
+    items = _stored_items(seeded["connection"], outcome.reconstruction_id)
+    assert not any(item["text"] == "Something." for item in items)
 
 
 def test_a_cross_project_source_reference_is_discarded(
@@ -312,21 +317,82 @@ def test_the_prompt_lists_only_the_projects_own_source_ids(
 # Provider failures
 # --------------------------------------------------------------------------
 
-def test_a_provider_failure_is_recorded_and_reported(seeded) -> None:
+def test_a_provider_failure_falls_back_to_a_labelled_draft(seeded) -> None:
+    """An unreachable provider must not leave the user at a dead end.
+
+    The run completes using the deterministic matcher, but the substitution is
+    disclosed and the result is flagged as not-from-a-model, so nobody can
+    mistake it for a successful model run.
+    """
     provider = FakeProvider({}, error=LLMUnavailable("The API rate limit was reached."))
     outcome = seeded["service"].run(seeded["project"], provider)
 
-    assert not outcome.ok
-    assert "rate limit" in outcome.message
+    assert outcome.ok
+    assert outcome.is_preview
+    assert "No AI model was called" in outcome.message
+    assert any("rate limit" in note for note in outcome.notes)
+    assert any("No AI model was called" in note for note in outcome.notes)
+
     latest = seeded["service"].latest(seeded["project"]["id"])
-    assert latest["status"] == ReconstructionStatus.FAILED
+    assert latest["is_demo_preview"] == 1
+    assert latest["model_provider"] == "deterministic-preview"
+    # The provider's own error is kept on the record, not swallowed.
+    assert "rate limit" in str(latest["processing_notes"])
 
 
-def test_malformed_json_is_reported_not_guessed(seeded) -> None:
+def test_malformed_json_falls_back_rather_than_being_guessed_at(seeded) -> None:
     provider = FakeProvider({}, error=LLMBadResponse("The model returned bad JSON."))
     outcome = seeded["service"].run(seeded["project"], provider)
-    assert not outcome.ok
-    assert _stored_items(seeded["connection"], "rec_nothing") == []
+    assert outcome.is_preview
+    assert any("bad JSON" in note for note in outcome.notes)
+    # Nothing was invented to paper over the unreadable reply.
+    latest = seeded["service"].latest(seeded["project"]["id"])
+    assert latest["is_demo_preview"] == 1
+
+
+def test_a_successful_run_is_never_marked_as_a_preview(seeded) -> None:
+    provider = FakeProvider({"items": [], "conflicts": [], "missing_information": []})
+    outcome = seeded["service"].run(seeded["project"], provider)
+    assert outcome.ok and not outcome.is_preview
+    assert seeded["service"].latest(seeded["project"]["id"])["is_demo_preview"] == 0
+
+
+def test_verification_counts_are_stored_for_display(seeded) -> None:
+    """The review screen shows what checking did, so the counts are persisted."""
+    provider = FakeProvider(
+        {
+            "items": [
+                {
+                    "category": "decision",
+                    "text": "Payment integration was postponed.",
+                    "evidence_status": "supported",
+                    "evidence": [
+                        {
+                            "source_id": seeded["source"]["id"],
+                            "location": "paragraph 2",
+                            "excerpt": "Payment integration was postponed until after the first release.",
+                        },
+                        {
+                            "source_id": "src_fabricated",
+                            "location": "page 9",
+                            "excerpt": "A quotation from a source that does not exist.",
+                        },
+                    ],
+                }
+            ],
+            "conflicts": [],
+            "missing_information": [],
+        }
+    )
+    outcome = seeded["service"].run(seeded["project"], provider)
+    latest = seeded["service"].latest(seeded["project"]["id"])
+    counts = seeded["service"].verification_counts(latest)
+
+    assert counts["evidence_total"] == 2
+    assert counts["evidence_verified"] == 1
+    assert counts["fabricated_source_ids"] == 1
+    assert counts["items_downgraded"] == 1
+    del outcome
 
 
 def test_a_project_with_no_usable_sources_is_refused(
