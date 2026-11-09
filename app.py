@@ -14,10 +14,10 @@ from database.connection import DatabaseError, get_connection
 from database.schema import initialise_database
 from trace_app import ui
 from trace_app.models import (
-    EVIDENCE_LABELS,
     ExtractionStatus,
     ReconstructionStatus,
     format_timestamp,
+    reconstruction_label,
 )
 from trace_app.services.demo_service import DemoService
 from trace_app.services.document_service import DocumentService, extraction_summary
@@ -85,17 +85,77 @@ def _goto(page: str, project_id: str | None = None) -> None:
     st.rerun()
 
 
+def _workflow_state(project: dict) -> list[tuple[str, str, str]]:
+    """Where this project stands, for the stepper. All counts come from rows."""
+    documents = _document_service()
+    reconstructions = _reconstruction_service()
+    reviews = _review_service()
+
+    sources = documents.list_sources(project["id"])
+    usable = [
+        s
+        for s in sources
+        if s["extraction_status"]
+        in (ExtractionStatus.EXTRACTED, ExtractionStatus.PARTIALLY_EXTRACTED)
+    ]
+    latest = reconstructions.latest(project["id"])
+    ready = latest is not None and str(latest["status"]) == ReconstructionStatus.DRAFT_READY
+    progress = reviews.progress(latest["id"]) if ready else None
+
+    # Stage 1 -- sources
+    if not sources:
+        steps = [("Add sources", "No documents yet", "now")]
+    else:
+        detail = f"{len(usable)} of {len(sources)} usable"
+        steps = [("Add sources", detail, "done" if usable else "now")]
+
+    # Stage 2 -- reconstruct
+    if not usable:
+        steps.append(("Reconstruct", "Needs a readable source", "todo"))
+    elif not latest:
+        steps.append(("Reconstruct", "Not started", "now"))
+    elif not ready:
+        steps.append(("Reconstruct", reconstruction_label(str(latest["status"])), "now"))
+    else:
+        total = progress.total if progress else 0
+        steps.append(("Reconstruct", f"{total} items proposed", "done"))
+
+    # Stage 3 -- review
+    if not ready or progress is None or progress.total == 0:
+        steps.append(("Review", "Nothing to review yet", "todo"))
+    elif progress.proposed:
+        steps.append(("Review", f"{progress.proposed} awaiting a decision", "now"))
+    else:
+        steps.append(("Review", f"{progress.approved} approved", "done"))
+
+    # Stage 4 -- handover. Only one step is ever "now", so the stepper reads as
+    # a position rather than two competing current actions. Export stays
+    # available while review is unfinished; the subtitle still says how much is
+    # ready, so nothing is hidden.
+    if not ready or progress is None or progress.approved == 0:
+        steps.append(("Handover", "Approve items to export", "todo"))
+    else:
+        noun = "item" if progress.approved == 1 else "items"
+        state = "now" if progress.proposed == 0 else "todo"
+        steps.append(("Handover", f"{progress.approved} {noun} ready", state))
+
+    return steps
+
+
+def _render_stepper(project: dict) -> None:
+    try:
+        st.markdown(ui.stepper(_workflow_state(project)), unsafe_allow_html=True)
+    except DatabaseError:
+        pass  # the stepper is orientation, never worth failing a page for
+
+
 # --------------------------------------------------------------------------
 # Sidebar
 # --------------------------------------------------------------------------
 
 def _render_sidebar() -> str:
     with st.sidebar:
-        st.markdown(
-            f'<div class="trace-brand">{config.APP_NAME}</div>'
-            f'<div class="trace-brand-sub">{config.APP_TAGLINE}</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown(ui.brand(), unsafe_allow_html=True)
 
         current = st.session_state.get("page", PAGE_DASHBOARD)
         if current not in NAV_PAGES:
@@ -113,25 +173,29 @@ def _render_sidebar() -> str:
 
         # Honest reporting of AI configuration -- no key means no reconstruction.
         llm = config.get_llm_config()
-        st.markdown('<div class="trace-meta-label">AI provider</div>', unsafe_allow_html=True)
+        st.markdown('<div class="tr-k">AI provider</div>', unsafe_allow_html=True)
         if llm.is_configured:
             st.markdown(
-                ui.pill("Configured", "positive")
-                + f'<div class="trace-note" style="margin-top:0.35rem">'
-                f"{html.escape(llm.provider)} &middot; {html.escape(llm.model)}</div>",
+                '<div style="margin-top:.4rem">'
+                + ui.pill("Configured", "positive")
+                + f'</div><div class="tr-note" style="margin-top:.4rem">'
+                f"{html.escape(llm.provider)} &middot; "
+                f"<code>{html.escape(llm.model)}</code></div>",
                 unsafe_allow_html=True,
             )
         else:
             st.markdown(
-                ui.pill("Not configured", "caution")
-                + '<div class="trace-note" style="margin-top:0.35rem">'
-                "Set <code>LLM_API_KEY</code> to enable AI reconstruction.</div>",
+                '<div style="margin-top:.4rem">'
+                + ui.pill("Not configured", "caution")
+                + '</div><div class="tr-note" style="margin-top:.4rem">'
+                "Reconstruction will use a clearly labelled deterministic "
+                "preview. Set <code>LLM_API_KEY</code> for AI analysis.</div>",
                 unsafe_allow_html=True,
             )
 
         st.markdown(ui.divider(), unsafe_allow_html=True)
         st.markdown(
-            f'<div class="trace-note">{html.escape(config.AI_DISCLAIMER)}</div>',
+            f'<div class="tr-note">{html.escape(config.AI_DISCLAIMER)}</div>',
             unsafe_allow_html=True,
         )
 
@@ -172,49 +236,42 @@ def _render_create_project_form(service: ProjectService) -> None:
 
 def _render_project_card(project: dict, service: ProjectService) -> None:
     del service  # not needed yet; kept for signature stability
-    name = html.escape(project["name"])
     tag = ui.demo_tag() if project.get("is_demo") else ""
     description = project.get("description") or "No description provided."
+    source_count = int(project.get("source_count") or 0)
+    extracted = int(project.get("extracted_count") or 0)
 
-    with st.container():
-        left, right = st.columns([5, 1.25], vertical_alignment="center")
-        with left:
-            st.markdown(
-                f'<div class="trace-card-title">{name}{tag}</div>'
-                f'<div class="trace-card-desc">{html.escape(description)}</div>',
-                unsafe_allow_html=True,
-            )
-            source_count = project.get("source_count", 0)
-            extracted = project.get("extracted_count", 0)
-            sources_text = (
-                "No sources yet"
-                if source_count == 0
-                else f"{source_count} source{'s' if source_count != 1 else ''}"
-                f" &middot; {extracted} extracted"
-            )
-            st.markdown(
-                '<div class="trace-note" style="margin-top:0.5rem">'
-                + ui.reconstruction_pill(project.get("latest_reconstruction_status"))
-                + f'<span style="margin-left:0.6rem">{sources_text}</span>'
-                f'<span style="margin-left:0.6rem">Created '
-                f"{html.escape(format_timestamp(project.get('created_at')))}</span>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-        with right:
-            if st.button("Open", key=f"open_{project['id']}", width="stretch"):
-                _goto(PAGE_WORKSPACE, project["id"])
-    st.markdown(ui.divider(), unsafe_allow_html=True)
+    facts = [
+        f"{source_count} source{'s' if source_count != 1 else ''}"
+        if source_count
+        else "No sources yet"
+    ]
+    if source_count:
+        facts.append(f"{extracted} extracted")
+    facts.append(f"Created {format_timestamp(project.get('created_at'))}")
+
+    st.markdown(
+        '<div class="tr-card tr-card-pad" style="margin-bottom:.35rem">'
+        f'<div class="tr-title">{ui.esc(project["name"])}{tag}</div>'
+        f'<div class="tr-desc" style="margin:.3rem 0 .7rem">{ui.esc(description)}</div>'
+        '<div class="tr-meta-row">'
+        + ui.reconstruction_pill(project.get("latest_reconstruction_status"))
+        + "".join(ui.chip(fact) for fact in facts)
+        + "</div></div>",
+        unsafe_allow_html=True,
+    )
+    _, action = st.columns([4, 1])
+    with action:
+        if st.button("Open", key=f"open_{project['id']}", width="stretch"):
+            _goto(PAGE_WORKSPACE, project["id"])
+    st.markdown('<div style="height:.7rem"></div>', unsafe_allow_html=True)
 
 
 def _render_dashboard(service: ProjectService) -> None:
-    st.markdown(f"# {config.APP_NAME}")
     st.markdown(
-        f'<div class="trace-card-desc" style="max-width:62ch;margin-bottom:0.3rem">'
-        f"{html.escape(config.APP_DESCRIPTION)}</div>",
+        ui.page_head("Project handovers", config.APP_DESCRIPTION, eyebrow="TRACE"),
         unsafe_allow_html=True,
     )
-    st.markdown(ui.divider(), unsafe_allow_html=True)
 
     if flash := st.session_state.pop("flash", None):
         st.success(flash)
@@ -227,18 +284,47 @@ def _render_dashboard(service: ProjectService) -> None:
         st.error(f"Projects could not be loaded: {exc}")
         return
 
-    listing, creator = st.columns([1.65, 1], gap="large")
+    # Every figure here is counted from rows, never invented.
+    if projects:
+        st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
+        st.markdown(
+            ui.stats(
+                [
+                    ("Projects", len(projects)),
+                    (
+                        "Source documents",
+                        sum(int(p.get("source_count") or 0) for p in projects),
+                    ),
+                    (
+                        "Drafts ready",
+                        sum(
+                            1
+                            for p in projects
+                            if p.get("latest_reconstruction_status")
+                            == ReconstructionStatus.DRAFT_READY
+                        ),
+                    ),
+                ]
+            ),
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(ui.divider(), unsafe_allow_html=True)
+    listing, creator = st.columns([1.7, 1], gap="large")
 
     with listing:
-        st.markdown("## Projects")
+        st.markdown("## Your projects")
         if not projects:
             st.markdown(
-                '<div class="trace-card">'
-                '<div class="trace-card-title">No projects yet</div>'
-                '<div class="trace-card-desc">Create a project workspace to start '
-                "adding source documents. Everything in TRACE belongs to a project, "
-                "so sources and handover items stay isolated from each other.</div>"
-                "</div>",
+                '<div class="tr-card tr-card-pad">'
+                '<div class="tr-title">No projects yet</div>'
+                '<div class="tr-desc" style="margin-top:.35rem">Create a project '
+                "workspace to start adding source documents. Everything in TRACE "
+                "belongs to a project, so sources and handover items stay isolated "
+                "from one another.</div>"
+                '<div class="tr-note" style="margin-top:.7rem">New here? Load the '
+                "CampusConnect demo on the right to see the whole workflow with "
+                "synthetic data.</div></div>",
                 unsafe_allow_html=True,
             )
         else:
@@ -255,15 +341,19 @@ def _render_demo_loader() -> None:
     if not demo.available():
         return
 
-    st.markdown(ui.divider(), unsafe_allow_html=True)
-    st.markdown("### Try the demo")
+    st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="trace-note">Loads <strong>CampusConnect</strong>, a '
-        "fictional campus events portal, with four synthetic source documents. "
-        "It describes no real institution. Nothing you have created is changed "
-        "or removed.</div>",
+        '<div class="tr-panel">'
+        '<div class="tr-title">Try the demo</div>'
+        '<div class="tr-desc" style="margin:.35rem 0 .2rem">Loads '
+        "<strong>CampusConnect</strong>, a fictional campus events portal, with "
+        "four synthetic source documents.</div>"
+        '<div class="tr-note" style="margin-top:.55rem">It describes no real '
+        "institution. Nothing you have created is changed or removed.</div>"
+        "</div>",
         unsafe_allow_html=True,
     )
+    st.markdown('<div style="height:.5rem"></div>', unsafe_allow_html=True)
     if st.button("Load the CampusConnect demo", width="stretch"):
         with st.spinner("Creating the demo project and extracting its sources…"):
             result = demo.load()
@@ -301,29 +391,29 @@ def _render_workspace(service: ProjectService) -> None:
         st.success(flash)
 
     tag = ui.demo_tag() if project.get("is_demo") else ""
-    st.markdown(f"# {html.escape(project['name'])}{tag}", unsafe_allow_html=True)
-    if project.get("description"):
-        st.markdown(
-            f'<div class="trace-card-desc" style="max-width:70ch">'
-            f"{html.escape(project['description'])}</div>",
-            unsafe_allow_html=True,
-        )
+    st.markdown(
+        ui.page_head(
+            project["name"],
+            project.get("description") or "",
+            eyebrow="Project workspace",
+            tag=tag,
+        ),
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div style="height:1.1rem"></div>', unsafe_allow_html=True)
+    _render_stepper(project)
 
     columns = st.columns(3)
-    with columns[0]:
-        st.markdown(
-            ui.meta_block("Created", format_timestamp(project.get("created_at"))),
-            unsafe_allow_html=True,
-        )
-    with columns[1]:
-        st.markdown(
-            ui.meta_block("Team", project.get("team_label") or "Not specified"),
-            unsafe_allow_html=True,
-        )
-    with columns[2]:
-        st.markdown(
-            ui.meta_block("Project ID", project["id"]), unsafe_allow_html=True
-        )
+    for column, (label, value) in zip(
+        columns,
+        [
+            ("Created", format_timestamp(project.get("created_at"))),
+            ("Team", project.get("team_label") or "Not specified"),
+            ("Project ID", project["id"]),
+        ],
+    ):
+        with column:
+            st.markdown(ui.meta_block(label, value), unsafe_allow_html=True)
 
     st.markdown(ui.divider(), unsafe_allow_html=True)
     _render_sources_section(project)
@@ -360,7 +450,7 @@ def _render_reconstruction_section(project: dict) -> None:
             )
         st.markdown(
             ui.reconstruction_pill(status)
-            + f'<div class="trace-note" style="margin-top:0.4rem">'
+            + f'<div class="tr-note" style="margin-top:0.4rem">'
             f"{html.escape(detail)}</div>",
             unsafe_allow_html=True,
         )
@@ -423,12 +513,12 @@ def _render_draft_summary(project: dict, latest: dict) -> None:
         return
 
     st.markdown(
-        f'<div class="trace-meta-label" style="margin-top:0.9rem">'
+        f'<div class="tr-k" style="margin-top:0.9rem">'
         f"Evidence status across {total} proposed item(s)</div>",
         unsafe_allow_html=True,
     )
     pills = " ".join(
-        ui.evidence_pill(status) + f' <span class="trace-note">{count}</span>'
+        ui.evidence_pill(status) + f' <span class="tr-note">{count}</span>'
         for status, count in summary.items()
         if count
     )
@@ -441,7 +531,7 @@ def _render_draft_summary(project: dict, latest: dict) -> None:
         with st.expander(f"Missing information noted by this run ({len(missing)})"):
             for entry in missing:
                 st.markdown(
-                    f'<div class="trace-note" style="margin-bottom:0.45rem">• '
+                    f'<div class="tr-note" style="margin-bottom:0.45rem">• '
                     f"{html.escape(entry)}</div>",
                     unsafe_allow_html=True,
                 )
@@ -451,7 +541,7 @@ def _render_draft_summary(project: dict, latest: dict) -> None:
             for note in str(latest["processing_notes"]).split("\n"):
                 if note.strip():
                     st.markdown(
-                        f'<div class="trace-note" style="margin-bottom:0.4rem">• '
+                        f'<div class="tr-note" style="margin-bottom:0.4rem">• '
                         f"{html.escape(note.strip())}</div>",
                         unsafe_allow_html=True,
                     )
@@ -470,7 +560,7 @@ def _render_upload_form(project: dict) -> None:
     documents = _document_service()
     st.markdown("### Add sources")
     st.markdown(
-        f'<div class="trace-note">Accepted: PDF, DOCX, TXT &middot; up to '
+        f'<div class="tr-note">Accepted: PDF, DOCX, TXT &middot; up to '
         f"{config.MAX_UPLOAD_MB} MB per file. "
         f"{html.escape(config.UPLOAD_PRIVACY_WARNING)}</div>",
         unsafe_allow_html=True,
@@ -533,25 +623,26 @@ def _render_upload_outcomes() -> None:
 def _render_source_row(project: dict, source: dict) -> None:
     documents = _document_service()
     status = source.get("extraction_status")
-    name = html.escape(str(source["display_name"]))
 
-    header, action = st.columns([6, 1], vertical_alignment="center")
+    facts = [
+        str(source["file_type"]).upper(),
+        human_size(int(source["file_size"])),
+        f"{int(source['char_count']):,} characters",
+    ]
+    if source.get("page_count"):
+        pages = int(source["page_count"])
+        facts.append(f"{pages} page{'s' if pages != 1 else ''}")
+
+    header, action = st.columns([5, 1.15], vertical_alignment="center")
     with header:
         st.markdown(
-            f'<div class="trace-card-title">{name}</div>'
-            '<div class="trace-note" style="margin-top:0.3rem">'
+            f'<div class="tr-title">{ui.esc(source["display_name"])}</div>'
+            '<div class="tr-meta-row" style="margin-top:.4rem">'
             + ui.extraction_pill(status)
-            + f'<span style="margin-left:0.6rem">'
-            f"{html.escape(str(source['file_type']).upper())} &middot; "
-            f"{html.escape(human_size(int(source['file_size'])))} &middot; "
-            f"{int(source['char_count']):,} characters"
-            + (
-                f" &middot; {int(source['page_count'])} pages"
-                if source.get("page_count")
-                else ""
-            )
-            + f" &middot; added {html.escape(format_timestamp(source['uploaded_at']))}"
-            "</span></div>",
+            + "".join(ui.chip(fact) for fact in facts)
+            + "</div>"
+            f'<div class="tr-note" style="margin-top:.35rem">Added '
+            f"{ui.esc(format_timestamp(source['uploaded_at']))}</div>",
             unsafe_allow_html=True,
         )
     with action:
@@ -571,7 +662,7 @@ def _render_source_row(project: dict, source: dict) -> None:
             segments = segments_from_json(full.get("segments_json"))
             if not segments:
                 st.markdown(
-                    f'<div class="trace-note">{html.escape((full.get("extracted_text") or "")[:_PREVIEW_CHAR_LIMIT])}</div>',
+                    ui.note((full.get("extracted_text") or "")[:_PREVIEW_CHAR_LIMIT]),
                     unsafe_allow_html=True,
                 )
             else:
@@ -580,16 +671,16 @@ def _render_source_row(project: dict, source: dict) -> None:
                     if len(segment.text) > _PREVIEW_CHAR_LIMIT:
                         body += " …"
                     st.markdown(
-                        ui.pill(segment.location_label, "info")
-                        + f'<div class="trace-note" style="margin:0.3rem 0 0.9rem">'
-                        f"{html.escape(body)}</div>",
+                        ui.pill(segment.location_label, "info", dot=False)
+                        + ui.quote(body),
                         unsafe_allow_html=True,
                     )
                 if len(segments) > _PREVIEW_SEGMENT_LIMIT:
                     st.markdown(
-                        f'<div class="trace-note">… and '
-                        f"{len(segments) - _PREVIEW_SEGMENT_LIMIT} further "
-                        "locations not shown in this preview.</div>",
+                        ui.note(
+                            f"… and {len(segments) - _PREVIEW_SEGMENT_LIMIT} further "
+                            "locations not shown in this preview."
+                        ),
                         unsafe_allow_html=True,
                     )
 
@@ -622,16 +713,16 @@ def _render_sources_section(project: dict) -> None:
             if summary["failed"]:
                 parts.append(f"{summary['failed']} failed")
             st.markdown(
-                f'<div class="trace-note" style="margin-bottom:0.9rem">'
+                f'<div class="tr-note" style="margin-bottom:0.9rem">'
                 f"{html.escape(' · '.join(parts))}</div>",
                 unsafe_allow_html=True,
             )
 
         if not sources:
             st.markdown(
-                '<div class="trace-card">'
-                '<div class="trace-card-title">No sources yet</div>'
-                '<div class="trace-card-desc">Upload the project records you are '
+                '<div class="tr-card">'
+                '<div class="tr-title">No sources yet</div>'
+                '<div class="tr-desc">Upload the project records you are '
                 "authorised to use — briefs, meeting notes, status updates, issue "
                 "lists. TRACE reconstructs the handover only from what you add "
                 "here.</div></div>",
@@ -660,86 +751,83 @@ def _render_evidence_block(item: dict) -> None:
     evidence = item.get("evidence") or []
     if not evidence:
         st.markdown(
-            '<div class="trace-note">No source evidence is attached to this '
-            "item, so it is recorded as unsupported.</div>",
+            ui.note(
+                "No source evidence is attached to this item, so it is recorded "
+                "as unsupported."
+            ),
             unsafe_allow_html=True,
         )
         return
 
     verified = sum(1 for row in evidence if row["verified"])
-    with st.expander(
-        f"Evidence ({verified} of {len(evidence)} verified against the sources)"
-    ):
+    label = f"Evidence — {verified} of {len(evidence)} verified against the sources"
+    with st.expander(label):
         for row in evidence:
-            tone = "positive" if row["verified"] else "negative"
-            state = "Verified in source" if row["verified"] else "Not found in source"
-            location = row.get("location_label") or "location not recorded"
+            ok = bool(row["verified"])
             st.markdown(
-                ui.pill(state, tone)
-                + f'<span class="trace-note" style="margin-left:0.6rem">'
-                f"{html.escape(str(row['source_display_name']))} &middot; "
-                f"{html.escape(str(location))}</span>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                '<div class="trace-note" style="margin:0.4rem 0 0.2rem;'
-                "padding:0.55rem 0.75rem;background:#F7F9FB;"
-                'border-left:3px solid #C4DAE8;border-radius:3px">'
-                f"&ldquo;{html.escape(str(row['excerpt']))}&rdquo;</div>",
+                '<div class="tr-meta-row">'
+                + ui.pill(
+                    "Verified in source" if ok else "Not found in source",
+                    "positive" if ok else "negative",
+                )
+                + ui.source_ref(
+                    row.get("source_display_name") or "unknown source",
+                    row.get("location_label") or "location not recorded",
+                )
+                + "</div>"
+                + ui.quote(row.get("excerpt") or "", verified=ok),
                 unsafe_allow_html=True,
             )
             if row.get("support_note"):
                 st.markdown(
-                    f'<div class="trace-note" style="margin-bottom:0.8rem;'
-                    f'color:#8C2F2F">{html.escape(str(row["support_note"]))}</div>',
+                    f'<div class="tr-note" style="color:#A32B2B;margin-bottom:.9rem">'
+                    f"{ui.esc(row['support_note'])}</div>",
                     unsafe_allow_html=True,
                 )
             else:
                 st.markdown(
-                    '<div style="margin-bottom:0.8rem"></div>', unsafe_allow_html=True
+                    '<div style="height:.7rem"></div>', unsafe_allow_html=True
                 )
 
 
 def _render_review_item(item: dict, reconstruction_id: str) -> None:
     reviews = _review_service()
     item_id = item["id"]
+    status = str(item["review_status"])
 
     with st.container(border=True):
-        st.markdown(
-            ui.evidence_pill(item["evidence_status"])
-            + " "
-            + ui.review_pill(item["review_status"])
-            + (
-                '<span class="trace-note" style="margin-left:0.6rem">'
-                "Worth checking before approval</span>"
-                if needs_attention(item)
-                and item["review_status"] == "proposed"
-                else ""
-            ),
-            unsafe_allow_html=True,
+        attention = (
+            '<span class="tr-attention">Worth checking before approval</span>'
+            if needs_attention(item) and status == "proposed"
+            else ""
         )
         st.markdown(
-            f'<div style="margin:0.55rem 0 0.35rem;font-size:0.97rem;'
-            f'line-height:1.5">{html.escape(str(item["text"]))}</div>',
+            '<div class="tr-meta-row">'
+            + ui.evidence_pill(item["evidence_status"])
+            + ui.review_pill(item["review_status"])
+            + attention
+            + "</div>"
+            f'<div class="tr-item-text">{ui.esc(item["text"])}</div>',
             unsafe_allow_html=True,
         )
 
-        if item.get("owner") or item.get("due_date"):
-            bits = []
-            if item.get("owner"):
-                bits.append(f"Owner: {item['owner']}")
-            if item.get("due_date"):
-                bits.append(f"Due: {item['due_date']}")
+        extras = []
+        if item.get("owner"):
+            extras.append(f"Owner: {item['owner']}")
+        if item.get("due_date"):
+            extras.append(f"Due: {item['due_date']}")
+        if extras:
             st.markdown(
-                f'<div class="trace-note">{html.escape(" · ".join(bits))}</div>',
+                '<div class="tr-meta-row" style="margin-bottom:.4rem">'
+                + "".join(ui.chip(extra) for extra in extras)
+                + "</div>",
                 unsafe_allow_html=True,
             )
-
         if item.get("reviewer_note"):
             st.markdown(
-                f'<div class="trace-note" style="margin-top:0.3rem">'
-                f"<strong>Note:</strong> {html.escape(str(item['reviewer_note']))}"
-                "</div>",
+                f'<div class="tr-note" style="margin-bottom:.5rem">'
+                f"<strong>Reviewer note:</strong> "
+                f"{ui.esc(item['reviewer_note'])}</div>",
                 unsafe_allow_html=True,
             )
 
@@ -747,10 +835,7 @@ def _render_review_item(item: dict, reconstruction_id: str) -> None:
 
         with st.expander("Edit this item or add a note"):
             new_text = st.text_area(
-                "Statement",
-                value=str(item["text"]),
-                key=f"text_{item_id}",
-                height=90,
+                "Statement", value=str(item["text"]), key=f"text_{item_id}", height=90
             )
             new_note = st.text_input(
                 "Reviewer note",
@@ -771,49 +856,40 @@ def _render_review_item(item: dict, reconstruction_id: str) -> None:
             history = reviews.history(item_id)
             if history:
                 st.markdown(
-                    '<div class="trace-meta-label" style="margin-top:0.7rem">'
-                    "Review history</div>",
+                    '<div class="tr-k" style="margin-top:.8rem">Review history</div>',
                     unsafe_allow_html=True,
                 )
                 for event in history:
+                    detail = (
+                        f": {ui.esc(event['note'])}" if event.get("note") else ""
+                    )
                     st.markdown(
-                        f'<div class="trace-note">{html.escape(format_timestamp(event["created_at"]))}'
-                        f" — {html.escape(str(event['action']))}"
-                        + (
-                            f": {html.escape(str(event['note']))}"
-                            if event.get("note")
-                            else ""
-                        )
-                        + "</div>",
+                        f'<div class="tr-note">'
+                        f"{ui.esc(format_timestamp(event['created_at']))} — "
+                        f"<strong>{ui.esc(event['action'])}</strong>{detail}</div>",
                         unsafe_allow_html=True,
                     )
 
-        approve_col, reject_col, reopen_col, _ = st.columns([1, 1, 1, 2.6])
-        status = str(item["review_status"])
-        with approve_col:
+        approve, reject, reopen, _ = st.columns([1, 1, 1, 2.4])
+        with approve:
             if st.button(
-                "Approve",
-                key=f"ok_{item_id}",
-                disabled=status == "approved",
-                width="stretch",
+                "Approve", key=f"ok_{item_id}",
+                disabled=status == "approved", width="stretch",
+                type="primary" if status == "proposed" else "secondary",
             ):
                 reviews.approve(item_id, reconstruction_id)
                 st.rerun()
-        with reject_col:
+        with reject:
             if st.button(
-                "Reject",
-                key=f"no_{item_id}",
-                disabled=status == "rejected",
-                width="stretch",
+                "Reject", key=f"no_{item_id}",
+                disabled=status == "rejected", width="stretch",
             ):
                 reviews.reject(item_id, reconstruction_id)
                 st.rerun()
-        with reopen_col:
+        with reopen:
             if st.button(
-                "Reopen",
-                key=f"re_{item_id}",
-                disabled=status == "proposed",
-                width="stretch",
+                "Reopen", key=f"re_{item_id}",
+                disabled=status == "proposed", width="stretch",
             ):
                 reviews.reopen(item_id, reconstruction_id)
                 st.rerun()
@@ -832,7 +908,7 @@ def _passes_filter(item: dict, choice: str) -> bool:
 def _render_review(service: ProjectService) -> None:
     project_id = st.session_state.get("project_id")
     if not project_id:
-        st.markdown("# Review Handover")
+        st.markdown(ui.page_head("Review handover", eyebrow="Review"), unsafe_allow_html=True)
         st.info("Open a project from the Dashboard to review its handover.")
         return
 
@@ -846,14 +922,20 @@ def _render_review(service: ProjectService) -> None:
     reviews = _review_service()
     latest = reconstructions.latest(project_id)
 
-    st.markdown(f"# Review Handover")
     st.markdown(
-        f'<div class="trace-card-desc">{html.escape(project["name"])}</div>',
+        ui.page_head(
+            project["name"],
+            "AI proposes; you decide. Every item needs a decision, and only "
+            "approved items reach the handover.",
+            eyebrow="Review handover",
+            tag=ui.demo_tag() if project.get("is_demo") else "",
+        ),
         unsafe_allow_html=True,
     )
+    st.markdown('<div style="height:1.1rem"></div>', unsafe_allow_html=True)
+    _render_stepper(project)
 
     if latest is None or str(latest["status"]) != ReconstructionStatus.DRAFT_READY:
-        st.markdown(ui.divider(), unsafe_allow_html=True)
         st.info(
             "There is no draft to review yet. Run a reconstruction from the "
             "Project Workspace first."
@@ -868,32 +950,25 @@ def _render_review(service: ProjectService) -> None:
         )
 
     progress = reviews.progress(latest["id"])
-    st.markdown(ui.divider(), unsafe_allow_html=True)
-
-    stats = st.columns(4)
-    with stats[0]:
-        st.markdown(ui.meta_block("Proposed", str(progress.total)), unsafe_allow_html=True)
-    with stats[1]:
-        st.markdown(ui.meta_block("Approved", str(progress.approved)), unsafe_allow_html=True)
-    with stats[2]:
-        st.markdown(ui.meta_block("Rejected", str(progress.rejected)), unsafe_allow_html=True)
-    with stats[3]:
-        st.markdown(
-            ui.meta_block("Awaiting review", str(progress.proposed)),
-            unsafe_allow_html=True,
-        )
-
     if progress.total:
-        st.progress(progress.fraction)
-    if progress.proposed:
         st.markdown(
-            f'<div class="trace-note">{progress.proposed} item(s) still need a '
-            "decision. Only approved items are exported.</div>",
+            ui.segmented_bar(
+                [
+                    ("Approved", progress.approved, "positive"),
+                    ("Rejected", progress.rejected, "negative"),
+                    ("Awaiting review", progress.proposed, "info"),
+                ],
+                progress.total,
+            ),
             unsafe_allow_html=True,
         )
-    elif progress.total:
         st.markdown(
-            '<div class="trace-note">Every item has been reviewed.</div>',
+            ui.note(
+                f"{progress.proposed} of {progress.total} item(s) still need a "
+                "decision. Only approved items are exported."
+                if progress.proposed
+                else f"Every one of the {progress.total} items has been reviewed."
+            ),
             unsafe_allow_html=True,
         )
 
@@ -902,8 +977,8 @@ def _render_review(service: ProjectService) -> None:
         with st.expander(f"Missing information noted by this run ({len(missing)})"):
             for entry in missing:
                 st.markdown(
-                    f'<div class="trace-note" style="margin-bottom:0.45rem">• '
-                    f"{html.escape(entry)}</div>",
+                    f'<div class="tr-note" style="margin-bottom:.45rem">• '
+                    f"{ui.esc(entry)}</div>",
                     unsafe_allow_html=True,
                 )
 
@@ -925,7 +1000,11 @@ def _render_review(service: ProjectService) -> None:
         if not visible:
             continue
         shown += len(visible)
-        st.markdown(f"## {label}")
+        st.markdown(
+            f'<h2 style="margin-top:1.5rem">{ui.esc(label)} '
+            f'<span class="tr-chip">{len(visible)}</span></h2>',
+            unsafe_allow_html=True,
+        )
         for item in visible:
             _render_review_item(item, latest["id"])
 
@@ -940,7 +1019,10 @@ def _render_review(service: ProjectService) -> None:
 def _render_export(service: ProjectService) -> None:
     project_id = st.session_state.get("project_id")
     if not project_id:
-        st.markdown("# Export")
+        st.markdown(
+            ui.page_head("Export handover", eyebrow="Export"),
+            unsafe_allow_html=True,
+        )
         st.info("Open a project from the Dashboard to export its handover.")
         return
 
@@ -954,12 +1036,18 @@ def _render_export(service: ProjectService) -> None:
     reviews = _review_service()
     latest = reconstructions.latest(project_id)
 
-    st.markdown("# Export")
     st.markdown(
-        f'<div class="trace-card-desc">{html.escape(project["name"])}</div>',
+        ui.page_head(
+            project["name"],
+            "Approved items only, each carrying the source, location and exact "
+            "quotation it rests on.",
+            eyebrow="Export handover",
+            tag=ui.demo_tag() if project.get("is_demo") else "",
+        ),
         unsafe_allow_html=True,
     )
-    st.markdown(ui.divider(), unsafe_allow_html=True)
+    st.markdown('<div style="height:1.1rem"></div>', unsafe_allow_html=True)
+    _render_stepper(project)
 
     if latest is None or str(latest["status"]) != ReconstructionStatus.DRAFT_READY:
         st.info(
@@ -969,22 +1057,16 @@ def _render_export(service: ProjectService) -> None:
         return
 
     progress = reviews.progress(latest["id"])
-    stats = st.columns(3)
-    with stats[0]:
-        st.markdown(
-            ui.meta_block("Approved (exported)", str(progress.approved)),
-            unsafe_allow_html=True,
-        )
-    with stats[1]:
-        st.markdown(
-            ui.meta_block("Awaiting review", str(progress.proposed)),
-            unsafe_allow_html=True,
-        )
-    with stats[2]:
-        st.markdown(
-            ui.meta_block("Rejected (never exported)", str(progress.rejected)),
-            unsafe_allow_html=True,
-        )
+    st.markdown(
+        ui.stats(
+            [
+                ("Approved — exported", progress.approved),
+                ("Awaiting review", progress.proposed),
+                ("Rejected — never exported", progress.rejected),
+            ]
+        ),
+        unsafe_allow_html=True,
+    )
 
     st.markdown(ui.divider(), unsafe_allow_html=True)
     st.markdown("### What to include")
@@ -1032,7 +1114,7 @@ def _render_export(service: ProjectService) -> None:
     st.markdown(ui.divider(), unsafe_allow_html=True)
     st.markdown("### Download")
     st.markdown(
-        f'<div class="trace-note">{data.included_count} item(s) will be '
+        f'<div class="tr-note">{data.included_count} item(s) will be '
         f"included. {data.rejected_count} rejected item(s) are excluded.</div>",
         unsafe_allow_html=True,
     )
