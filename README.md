@@ -150,6 +150,31 @@ model claimed, never raised:
 An owner or a due date is dropped entirely unless something verified supports
 it. A model that labels everything "supported" therefore gains nothing by it.
 
+### Accounts and roles
+
+Every screen is behind sign-in, and each project has its own membership list.
+A role is read from the database on each call, so revoking someone's access
+takes effect immediately rather than when their session expires.
+
+| Role | Can do |
+|---|---|
+| **Owner** | Everything, including managing members and deleting the project |
+| **Project manager** | Add sources, run reconstruction, approve and reject. Cannot change access |
+| **Incoming developer** | Read every item and the source documents, and export. Cannot change anything |
+| **Viewer** | Read the approved handover and the evidence quoted in it. Cannot open source documents, and cannot see items still under review |
+
+**These are enforced in the service layer, not the interface.** A viewer asking
+for a source document gets `AccessDenied` from `DocumentService`, not a hidden
+button, and `ReviewService.list_items` filters to approved items *before*
+returning, so an unapproved item is never handed out. The test suite asserts
+this by having each role attempt what it should not be able to do and checking
+that the call raises.
+
+Two smaller consequences worth noting, both tested: a principal issued for one
+project cannot be replayed against another, and a role that cannot see
+unapproved items is not told how many exist either — reporting the count would
+leak it.
+
 ## 6. Environment variables
 
 TRACE reads settings from the process environment first, then from Streamlit's
@@ -323,9 +348,9 @@ Stated plainly, because an honest limitation is worth more than an overclaim.
 - **Not deployed yet.** There is no public URL. Everything below has been
   verified locally only.
 
-- **Single-user demo.** There is no authentication, no user accounts, and no
-  role-based access control. Anyone who can open the app can see every project
-  in that deployment.
+- **Accounts are local to each deployment.** TRACE stores its own accounts
+  (scrypt-hashed passwords); there is no SSO, no email verification and no
+  password reset yet.
 - **SQLite on ephemeral hosting.** Streamlit Community Cloud does not guarantee
   a persistent disk. Data can be lost when the container restarts. TRACE does
   not promise long-term persistence.

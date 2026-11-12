@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 
 #: Bump this and add a matching block in ``_MIGRATIONS`` for every change.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -121,8 +121,47 @@ ALTER TABLE sources ADD COLUMN segments_json TEXT;
 ALTER TABLE sources ADD COLUMN extraction_notes TEXT;
 """
 
+# Version 3 introduces accounts and per-project roles. Access control is
+# enforced in the service layer against these rows (see trace_app.security),
+# not in the interface.
+#
+# projects.owner_id is nullable because projects created before this migration
+# have no owner. Such a project has no members, so it is listed to nobody -- it
+# is not silently adopted by whoever signs in first, which would be a hole.
+_MIGRATION_3 = """
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    email         TEXT NOT NULL,
+    display_name  TEXT,
+    password_hash TEXT NOT NULL,
+    is_demo       INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    last_login_at TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email
+    ON users (email COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS project_members (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    role       TEXT NOT NULL,
+    added_at   TEXT NOT NULL,
+    added_by   TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_members_project_user
+    ON project_members (project_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_members_user ON project_members (user_id);
+
+ALTER TABLE projects ADD COLUMN owner_id TEXT REFERENCES users (id);
+"""
+
 #: Ordered migrations. Index 0 takes the database from version 0 to 1.
-_MIGRATIONS = [_MIGRATION_1, _MIGRATION_2]
+_MIGRATIONS = [_MIGRATION_1, _MIGRATION_2, _MIGRATION_3]
 
 
 def _current_version(connection: sqlite3.Connection) -> int:

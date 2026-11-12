@@ -28,6 +28,7 @@ from trace_app.models import (
     ReviewStatus,
     category_label,
 )
+from trace_app.security.authz import Capability, Principal, require
 
 MAX_ITEM_TEXT = 800
 MAX_NOTE = 1000
@@ -68,23 +69,60 @@ def _clean(value: str | None, limit: int) -> str | None:
 
 
 class ReviewService:
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    """Handover items, scoped to one actor.
+
+    A role without VIEW_ALL_ITEMS does not merely have items hidden from its
+    screen: :meth:`list_items` filters to approved items before returning, so
+    an unapproved item is never handed out at all.
+    """
+
+    def __init__(self, connection: sqlite3.Connection, principal: Principal) -> None:
         self._connection = connection
+        self._principal = principal
         self._items = HandoverItemRepository(connection)
         self._evidence = EvidenceRepository(connection)
         self._events = ReviewEventRepository(connection)
 
+    @property
+    def principal(self) -> Principal:
+        return self._principal
+
+    def can_review(self) -> bool:
+        return self._principal.can(Capability.REVIEW_ITEMS)
+
+    def sees_only_approved(self) -> bool:
+        return not self._principal.can(Capability.VIEW_ALL_ITEMS)
+
     # ------------------------------------------------------------------ read
     def _require_item(self, item_id: str, reconstruction_id: str) -> dict[str, Any]:
+        """Fetch an item for modification, checking the role first."""
+        require(self._principal, Capability.REVIEW_ITEMS)
         item = self._items.get(item_id, reconstruction_id)
         if item is None:
             raise ReviewError("That handover item could not be found.")
         return item
 
     def list_items(self, reconstruction_id: str) -> list[dict[str, Any]]:
-        """All items for a reconstruction, each with its evidence attached."""
+        """Items for a reconstruction, each with its evidence attached.
+
+        Narrowed to approved items for a role that cannot see the rest. The
+        filtering happens here, not in the interface, so there is no route by
+        which a viewer receives an item still under review.
+        """
+        require(self._principal, Capability.VIEW_APPROVED)
         items = self._items.list_for_reconstruction(reconstruction_id)
-        evidence = self._evidence.list_for_items([item["id"] for item in items])
+
+        if not self._principal.can(Capability.VIEW_ALL_ITEMS):
+            items = [
+                item
+                for item in items
+                if str(item["review_status"]) == ReviewStatus.APPROVED
+            ]
+
+        if self._principal.can(Capability.VIEW_EVIDENCE):
+            evidence = self._evidence.list_for_items([item["id"] for item in items])
+        else:
+            evidence = {}
         for item in items:
             item["evidence"] = evidence.get(item["id"], [])
         return items
@@ -112,10 +150,23 @@ class ReviewService:
         return ordered
 
     def progress(self, reconstruction_id: str) -> ReviewProgress:
+        """Review counts, limited to what this role is allowed to know.
+
+        A role that cannot see unapproved items is not told how many there
+        are either -- reporting "22 awaiting a decision" to someone who may
+        not see those 22 leaks their existence and offers filters that can
+        only ever come back empty.
+        """
+        require(self._principal, Capability.VIEW_APPROVED)
         counts = self._items.count_by_review_status(reconstruction_id)
+        approved = counts.get(str(ReviewStatus.APPROVED), 0)
+
+        if not self._principal.can(Capability.VIEW_ALL_ITEMS):
+            return ReviewProgress(proposed=0, approved=approved, rejected=0)
+
         return ReviewProgress(
             proposed=counts.get(str(ReviewStatus.PROPOSED), 0),
-            approved=counts.get(str(ReviewStatus.APPROVED), 0),
+            approved=approved,
             rejected=counts.get(str(ReviewStatus.REJECTED), 0),
         )
 

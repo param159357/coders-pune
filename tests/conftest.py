@@ -19,7 +19,24 @@ if str(ROOT) not in sys.path:
 
 from database.connection import get_connection  # noqa: E402
 from database.schema import initialise_database  # noqa: E402
+from trace_app.security.authz import Principal  # noqa: E402
+from trace_app.services.auth_service import AuthService  # noqa: E402
 from trace_app.services.project_service import ProjectService  # noqa: E402
+
+#: Default actor for tests that are not themselves about access control.
+#: Named rather than implicit, so a test that needs a weaker role has to say
+#: so and a missing principal can never silently mean "allow everything".
+OWNER = Principal(user_id="usr_test_owner", email="owner@test.local", role="owner")
+
+
+def principal(role: str, project_id: str | None = None) -> Principal:
+    """Build a principal for a given role, for access-control tests."""
+    return Principal(
+        user_id=f"usr_test_{role}",
+        email=f"{role}@test.local",
+        role=role,
+        project_id=project_id,
+    )
 
 
 @pytest.fixture()
@@ -109,3 +126,19 @@ def isolated_storage(tmp_path: Path, monkeypatch):
     upload_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(config, "UPLOAD_DIR", upload_dir)
     return upload_dir
+
+
+@pytest.fixture()
+def owner() -> Principal:
+    return OWNER
+
+
+@pytest.fixture()
+def auth(connection) -> AuthService:
+    return AuthService(connection)
+
+
+@pytest.fixture()
+def account(auth: AuthService) -> dict:
+    """A registered account used as the acting user."""
+    return auth.register("tester@test.local", "test-password", "Tester")

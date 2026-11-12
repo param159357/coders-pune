@@ -17,6 +17,7 @@ from typing import Any
 import config
 from database.repositories import ProjectRepository, SourceRepository
 from trace_app.models import ExtractionStatus, new_id
+from trace_app.security.authz import Capability, Principal, require
 from trace_app.services.extraction_service import extract_text
 from trace_app.utils.file_validation import (
     FileValidationError,
@@ -43,22 +44,48 @@ class UploadOutcome:
 
 
 class DocumentService:
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    """Source documents, scoped to one actor.
+
+    The principal is held by the service rather than passed per call, so a
+    caller cannot read a source without having stated who is asking. Every
+    read of document content checks VIEW_SOURCES; a role without it cannot
+    retrieve the text through any method here.
+    """
+
+    def __init__(self, connection: sqlite3.Connection, principal: Principal) -> None:
         self._connection = connection
+        self._principal = principal
         self._sources = SourceRepository(connection)
         self._projects = ProjectRepository(connection)
 
+    @property
+    def principal(self) -> Principal:
+        return self._principal
+
+    def can_read_sources(self) -> bool:
+        return self._principal.can(Capability.VIEW_SOURCES)
+
+    def can_add_sources(self) -> bool:
+        return self._principal.can(Capability.UPLOAD_SOURCES)
+
     # ----------------------------------------------------------------- read
     def list_sources(self, project_id: str) -> list[dict[str, Any]]:
+        require(self._principal, Capability.VIEW_SOURCES, project_id)
         return self._sources.list_for_project(project_id)
 
     def get_source(self, source_id: str, project_id: str) -> dict[str, Any] | None:
-        """Fetch a source, enforcing project ownership."""
+        """Fetch a source, enforcing both the role and project ownership."""
+        require(self._principal, Capability.VIEW_SOURCES, project_id)
         return self._sources.get(source_id, project_id)
 
     def usable_sources(self, project_id: str) -> list[dict[str, Any]]:
         """Sources with extracted text -- the only input to reconstruction."""
+        require(self._principal, Capability.VIEW_SOURCES, project_id)
         return self._sources.list_usable_for_project(project_id)
+
+    def source_count(self, project_id: str) -> int:
+        """How many sources exist. A count is metadata, not content."""
+        return self._sources.count_for_project(project_id)
 
     # --------------------------------------------------------------- upload
     def upload(
@@ -66,9 +93,12 @@ class DocumentService:
     ) -> UploadOutcome:
         """Validate, store, and extract a single uploaded file.
 
-        Never raises for a bad document: the outcome carries a user-facing
-        message instead, so one rejected file does not abort a batch.
+        Never raises for a bad document -- the outcome carries a user-facing
+        message instead, so one rejected file does not abort a batch. An
+        access failure *does* raise, because that is not a document problem.
         """
+        require(self._principal, Capability.UPLOAD_SOURCES, project_id)
+
         # 1. Validate before touching the disk.
         try:
             validated = validate_upload(raw_name, content)
@@ -167,6 +197,7 @@ class DocumentService:
         Refused when handover evidence still cites it, so an evidence trail can
         never be silently broken (spec section 8).
         """
+        require(self._principal, Capability.UPLOAD_SOURCES, project_id)
         source = self._sources.get(source_id, project_id)
         if source is None:
             return False, "That source could not be found in this project."

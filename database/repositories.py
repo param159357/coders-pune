@@ -488,3 +488,171 @@ class ReviewEventRepository:
             (reconstruction_id,),
         ).fetchone()
         return int(row["c"])
+
+
+class UserRepository:
+    """Accounts. Password hashes never leave this layer except to be verified."""
+
+    #: Columns safe to hand to the rest of the application.
+    _PUBLIC = "id, email, display_name, is_demo, created_at, last_login_at"
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def create(
+        self,
+        email: str,
+        password_hash: str,
+        display_name: str | None = None,
+        is_demo: bool = False,
+    ) -> dict[str, Any]:
+        user_id = new_id("usr")
+        with transaction(self._connection):
+            self._connection.execute(
+                "INSERT INTO users (id, email, display_name, password_hash,"
+                " is_demo, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    user_id,
+                    email,
+                    display_name,
+                    password_hash,
+                    1 if is_demo else 0,
+                    utc_now(),
+                ),
+            )
+        stored = self.get(user_id)
+        if stored is None:  # pragma: no cover - would indicate a failed insert
+            raise RuntimeError("User insert succeeded but the row is missing")
+        return stored
+
+    def get(self, user_id: str) -> dict[str, Any] | None:
+        row = self._connection.execute(
+            f"SELECT {self._PUBLIC} FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+
+    def find_by_email(self, email: str) -> dict[str, Any] | None:
+        row = self._connection.execute(
+            f"SELECT {self._PUBLIC} FROM users WHERE email = ? COLLATE NOCASE",
+            (email,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+    def password_hash_for(self, email: str) -> tuple[str, str] | None:
+        """Return ``(user_id, password_hash)`` for a login attempt."""
+        row = self._connection.execute(
+            "SELECT id, password_hash FROM users WHERE email = ? COLLATE NOCASE",
+            (email,),
+        ).fetchone()
+        return (row["id"], row["password_hash"]) if row else None
+
+    def record_login(self, user_id: str) -> None:
+        with transaction(self._connection):
+            self._connection.execute(
+                "UPDATE users SET last_login_at = ? WHERE id = ?",
+                (utc_now(), user_id),
+            )
+
+    def count(self) -> int:
+        return int(
+            self._connection.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+        )
+
+
+class MembershipRepository:
+    """Who may act on which project, and in what role."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def grant(
+        self, project_id: str, user_id: str, role: str, added_by: str | None = None
+    ) -> None:
+        """Add or change a member's role. Idempotent on (project, user)."""
+        with transaction(self._connection):
+            self._connection.execute(
+                "INSERT INTO project_members (id, project_id, user_id, role,"
+                " added_at, added_by) VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT (project_id, user_id)"
+                " DO UPDATE SET role = excluded.role",
+                (
+                    new_id("mem"),
+                    project_id,
+                    user_id,
+                    str(role),
+                    utc_now(),
+                    added_by,
+                ),
+            )
+
+    def revoke(self, project_id: str, user_id: str) -> None:
+        with transaction(self._connection):
+            self._connection.execute(
+                "DELETE FROM project_members WHERE project_id = ? AND user_id = ?",
+                (project_id, user_id),
+            )
+
+    def role_for(self, project_id: str, user_id: str) -> str | None:
+        """The single source of truth for 'may this user touch this project'."""
+        row = self._connection.execute(
+            "SELECT role FROM project_members WHERE project_id = ? AND user_id = ?",
+            (project_id, user_id),
+        ).fetchone()
+        return str(row["role"]) if row else None
+
+    def list_members(self, project_id: str) -> list[dict[str, Any]]:
+        rows = self._connection.execute(
+            "SELECT m.id, m.role, m.added_at, u.id AS user_id, u.email,"
+            " u.display_name FROM project_members m"
+            " JOIN users u ON u.id = m.user_id"
+            " WHERE m.project_id = ?"
+            " ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'manager' THEN 1"
+            "   WHEN 'developer' THEN 2 ELSE 3 END, u.email",
+            (project_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def projects_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        """Projects this user is a member of, with their role on each.
+
+        This is the only listing the dashboard uses, so a project the user has
+        no membership on is not merely hidden -- it is never fetched.
+        """
+        rows = self._connection.execute(
+            """
+            SELECT
+                p.*,
+                m.role AS member_role,
+                (SELECT COUNT(*) FROM sources s
+                  WHERE s.project_id = p.id) AS source_count,
+                (SELECT COUNT(*) FROM sources s
+                  WHERE s.project_id = p.id
+                    AND s.extraction_status IN ('extracted', 'partially_extracted')
+                ) AS extracted_count,
+                (SELECT r.status FROM reconstructions r
+                  WHERE r.project_id = p.id
+                  ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1
+                ) AS latest_reconstruction_status
+            FROM project_members m
+            JOIN projects p ON p.id = m.project_id
+            WHERE m.user_id = ?
+            ORDER BY p.created_at DESC, p.rowid DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        projects: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            record["latest_reconstruction_status"] = (
+                record.get("latest_reconstruction_status") or "not_started"
+            )
+            projects.append(record)
+        return projects
+
+    def count_for_project(self, project_id: str) -> int:
+        return int(
+            self._connection.execute(
+                "SELECT COUNT(*) AS c FROM project_members WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()["c"]
+        )

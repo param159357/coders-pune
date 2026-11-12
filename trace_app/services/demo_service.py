@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import config
+from trace_app.security.authz import Principal
+from trace_app.services.auth_service import AuthService
 from trace_app.services.document_service import DocumentService
 from trace_app.services.project_service import ProjectService
 
@@ -47,20 +49,70 @@ class DemoResult:
     files_added: int = 0
 
 
+#: Demo accounts created alongside the demo project, so the role-aware views
+#: can be seen working rather than described. Their password is shown in the
+#: interface on purpose: these exist only to demonstrate access control on
+#: synthetic data, and they are flagged is_demo in the database.
+DEMO_PASSWORD = "tracedemo2026"
+DEMO_ACCOUNTS: tuple[tuple[str, str, str], ...] = (
+    ("manager@campusconnect.demo", "Priya (Project manager)", "manager"),
+    ("developer@campusconnect.demo", "Sam (Incoming developer)", "developer"),
+    ("viewer@campusconnect.demo", "Alex (Viewer)", "viewer"),
+)
+
+
 class DemoService:
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    """Loads the synthetic demo on behalf of a signed-in user."""
+
+    def __init__(self, connection: sqlite3.Connection, user: dict[str, Any]) -> None:
+        self._connection = connection
+        self._user = user
+        self._auth = AuthService(connection)
         self._projects = ProjectService(connection)
-        self._documents = DocumentService(connection)
+        # The loader acts as the project's owner: it is creating the project.
+        self._owner = Principal(
+            user_id=str(user["id"]),
+            email=str(user["email"]),
+            role="owner",
+        )
+        self._documents = DocumentService(connection, self._owner)
 
     def existing_demo(self) -> dict[str, Any] | None:
-        project = self._projects.find_by_name(DEMO_PROJECT_NAME)
-        return project if project and project.get("is_demo") else project
+        """The caller's own demo project, if they already loaded one."""
+        for project in self._auth.projects_for(self._user):
+            if (
+                str(project.get("name", "")).lower() == DEMO_PROJECT_NAME.lower()
+                and project.get("is_demo")
+            ):
+                return project
+        return None
 
     def available(self) -> bool:
         """Whether the demo source files are present in this deployment."""
         return DEMO_DIR.is_dir() and any(
             (DEMO_DIR / name).is_file() for name in DEMO_FILES
         )
+
+    def _seed_demo_members(self, project_id: str) -> None:
+        """Create the three demo accounts and grant them their roles.
+
+        These let a visitor sign in as each role and see the access checks
+        actually refuse things, instead of taking the claim on trust.
+        """
+        for email, name, role in DEMO_ACCOUNTS:
+            account = self._auth.find_by_email(email)
+            if account is None:
+                try:
+                    account = self._auth.register(
+                        email, DEMO_PASSWORD, name, is_demo=True
+                    )
+                except Exception:  # pragma: no cover - lost a race; reuse it
+                    account = self._auth.find_by_email(email)
+            if account is not None:
+                try:
+                    self._auth.grant_role(self._owner, project_id, email, role)
+                except Exception:  # pragma: no cover - already granted
+                    pass
 
     def load(self) -> DemoResult:
         """Create the demo project and upload its sources. Idempotent."""
@@ -82,7 +134,13 @@ class DemoService:
                 team_label=DEMO_TEAM,
                 is_demo=True,
             )
+            self._auth.register_owner(project["id"], str(self._user["id"]))
             created = True
+        # Rebuild the principal now that the project exists, so uploads below
+        # are checked against a real membership rather than an assumed role.
+        self._owner = self._auth.principal_for(self._user, project["id"])
+        self._documents = DocumentService(self._connection, self._owner)
+        self._seed_demo_members(project["id"])
 
         added = 0
         skipped = 0

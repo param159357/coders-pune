@@ -6,6 +6,8 @@ import sqlite3
 
 import pytest
 
+from tests.conftest import OWNER
+
 from trace_app.models import ExtractionStatus, new_id, utc_now
 from trace_app.services.document_service import DocumentService, extraction_summary
 from trace_app.services.project_service import ProjectService
@@ -14,7 +16,7 @@ from trace_app.services.project_service import ProjectService
 @pytest.fixture()
 def documents(connection: sqlite3.Connection, isolated_storage) -> DocumentService:
     del isolated_storage  # applied via monkeypatch; required for ordering
-    return DocumentService(connection)
+    return DocumentService(connection, OWNER)
 
 
 TXT = b"Initial release focuses on event discovery.\n\nPayment was postponed."

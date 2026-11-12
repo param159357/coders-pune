@@ -48,6 +48,7 @@ from trace_app.models import (
     ReconstructionStatus,
     ReviewStatus,
 )
+from trace_app.security.authz import Capability, Principal, require
 from trace_app.services.evidence_service import (
     SourceIndex,
     VerificationReport,
@@ -134,8 +135,11 @@ def _merge_drafts(drafts: list[ReconstructionDraft]) -> ReconstructionDraft:
 
 
 class ReconstructionService:
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    """The reconstruction pipeline, scoped to one actor."""
+
+    def __init__(self, connection: sqlite3.Connection, principal: Principal) -> None:
         self._connection = connection
+        self._principal = principal
         self._sources = SourceRepository(connection)
         self._reconstructions = ReconstructionRepository(connection)
         self._items = HandoverItemRepository(connection)
@@ -155,11 +159,15 @@ class ReconstructionService:
         )
 
     # ------------------------------------------------------------------- run
+    def can_run(self) -> bool:
+        return self._principal.can(Capability.RUN_RECONSTRUCTION)
+
     def run(
         self, project: dict[str, Any], provider: LLMProvider | None = None
     ) -> ReconstructionOutcome:
         """Run the pipeline for one project and persist a draft."""
         project_id = str(project["id"])
+        require(self._principal, Capability.RUN_RECONSTRUCTION, project_id)
         sources = self._sources.list_usable_for_project(project_id)
 
         if not sources:

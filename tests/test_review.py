@@ -6,6 +6,8 @@ import sqlite3
 
 import pytest
 
+from tests.conftest import OWNER
+
 from database.repositories import (
     EvidenceRepository,
     HandoverItemRepository,
@@ -29,7 +31,7 @@ BRIEF = (
 def draft(connection: sqlite3.Connection, isolated_storage, project: dict):
     """A reconstruction with three items of differing evidence strength."""
     del isolated_storage
-    source = DocumentService(connection).upload(
+    source = DocumentService(connection, OWNER).upload(
         project["id"], "brief.txt", BRIEF.encode()
     ).source
 
@@ -69,7 +71,7 @@ def draft(connection: sqlite3.Connection, isolated_storage, project: dict):
         "supported": supported,
         "unsupported": unsupported,
         "overview": overview,
-        "service": ReviewService(connection),
+        "service": ReviewService(connection, OWNER),
     }
 
 

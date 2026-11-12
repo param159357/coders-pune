@@ -19,7 +19,17 @@ from trace_app.models import (
     format_timestamp,
     reconstruction_label,
 )
-from trace_app.services.demo_service import DemoService
+from trace_app.security.authz import (
+    AccessDenied,
+    Capability,
+    Principal,
+    ROLE_DESCRIPTIONS,
+    ROLE_LABELS,
+    Role,
+    assignable_roles,
+)
+from trace_app.services.auth_service import AuthError, AuthService
+from trace_app.services.demo_service import DEMO_ACCOUNTS, DEMO_PASSWORD, DemoService
 from trace_app.services.document_service import DocumentService, extraction_summary
 from trace_app.services.extraction_service import segments_from_json
 from trace_app.services.project_service import ProjectService, ValidationError
@@ -42,7 +52,10 @@ PAGE_DASHBOARD = "Dashboard"
 PAGE_WORKSPACE = "Project Workspace"
 PAGE_REVIEW = "Review Handover"
 PAGE_EXPORT = "Export"
-NAV_PAGES = [PAGE_DASHBOARD, PAGE_WORKSPACE, PAGE_REVIEW, PAGE_EXPORT]
+PAGE_ACCESS = "Access"
+NAV_PAGES = [
+    PAGE_DASHBOARD, PAGE_WORKSPACE, PAGE_REVIEW, PAGE_EXPORT, PAGE_ACCESS,
+]
 
 
 # --------------------------------------------------------------------------
@@ -62,20 +75,50 @@ def _project_service() -> ProjectService:
     return ProjectService(_database())
 
 
-def _document_service() -> DocumentService:
-    return DocumentService(_database())
+def _auth_service() -> AuthService:
+    return AuthService(_database())
 
 
-def _reconstruction_service() -> ReconstructionService:
-    return ReconstructionService(_database())
+def _current_user() -> dict | None:
+    """The signed-in account, re-read so a removed account stops working."""
+    user_id = st.session_state.get("user_id")
+    return _auth_service().get_user(user_id) if user_id else None
 
 
-def _review_service() -> ReviewService:
-    return ReviewService(_database())
+def _principal(project_id: str | None = None) -> Principal:
+    """The acting principal, derived from a stored membership.
+
+    Looked up on every call, so revoking a role takes effect at once rather
+    than whenever a session happens to expire.
+    """
+    user = _current_user()
+    if user is None:
+        raise AccessDenied("You must sign in to do that.")
+    target = project_id or st.session_state.get("project_id")
+    if not target:
+        # No project in scope: a principal with no role, so every project-level
+        # capability check fails closed.
+        return Principal(
+            user_id=str(user["id"]), email=str(user["email"]), role="", project_id=None
+        )
+    return _auth_service().principal_for(user, target)
 
 
-def _demo_service() -> DemoService:
-    return DemoService(_database())
+def _document_service(project_id: str | None = None) -> DocumentService:
+    return DocumentService(_database(), _principal(project_id))
+
+
+def _reconstruction_service(project_id: str | None = None) -> ReconstructionService:
+    return ReconstructionService(_database(), _principal(project_id))
+
+
+def _review_service(project_id: str | None = None) -> ReviewService:
+    return ReviewService(_database(), _principal(project_id))
+
+
+def _demo_service() -> DemoService | None:
+    user = _current_user()
+    return DemoService(_database(), user) if user else None
 
 
 def _goto(page: str, project_id: str | None = None) -> None:
@@ -85,13 +128,44 @@ def _goto(page: str, project_id: str | None = None) -> None:
     st.rerun()
 
 
+def _open_project(project_id: str) -> None:
+    """Open a project on the first screen this user's role can actually use.
+
+    Sending a viewer to the workspace would bounce them straight back to the
+    dashboard with no explanation, because their role cannot open source
+    documents. Land them where their role begins instead.
+    """
+    st.session_state["project_id"] = project_id
+    try:
+        actor = _principal(project_id)
+    except AccessDenied:
+        st.session_state["page"] = PAGE_DASHBOARD
+        st.rerun()
+        return
+
+    if actor.can(Capability.VIEW_SOURCES) or actor.can(Capability.UPLOAD_SOURCES):
+        st.session_state["page"] = PAGE_WORKSPACE
+    elif actor.can(Capability.VIEW_APPROVED):
+        st.session_state["page"] = PAGE_REVIEW
+    else:
+        st.session_state["page"] = PAGE_ACCESS
+    st.rerun()
+
+
 def _workflow_state(project: dict) -> list[tuple[str, str, str]]:
     """Where this project stands, for the stepper. All counts come from rows."""
-    documents = _document_service()
-    reconstructions = _reconstruction_service()
-    reviews = _review_service()
+    documents = _document_service(project["id"])
+    reconstructions = _reconstruction_service(project["id"])
+    reviews = _review_service(project["id"])
 
-    sources = documents.list_sources(project["id"])
+    # A role without VIEW_SOURCES still gets a stepper, just without source
+    # detail. A count is metadata; the documents themselves stay unreachable.
+    if documents.can_read_sources():
+        sources = documents.list_sources(project["id"])
+    else:
+        sources = [
+            {"extraction_status": ExtractionStatus.EXTRACTED}
+        ] * documents.source_count(project["id"])
     usable = [
         s
         for s in sources
@@ -153,17 +227,43 @@ def _render_stepper(project: dict) -> None:
 # Sidebar
 # --------------------------------------------------------------------------
 
+def _visible_pages() -> list[str]:
+    """Pages this user can use, given their role on the project in scope.
+
+    Hiding a page is a convenience, not the control: each screen behind these
+    checks its own capabilities, and the services check again below that.
+    """
+    pages = [PAGE_DASHBOARD]
+    project_id = st.session_state.get("project_id")
+    if not project_id:
+        return pages
+    try:
+        actor = _principal(project_id)
+    except AccessDenied:
+        return pages
+
+    if actor.can(Capability.VIEW_SOURCES) or actor.can(Capability.UPLOAD_SOURCES):
+        pages.append(PAGE_WORKSPACE)
+    if actor.can(Capability.VIEW_APPROVED):
+        pages.append(PAGE_REVIEW)
+    if actor.can(Capability.EXPORT):
+        pages.append(PAGE_EXPORT)
+    pages.append(PAGE_ACCESS)
+    return pages
+
+
 def _render_sidebar() -> str:
+    user = _current_user()
     with st.sidebar:
         st.markdown(ui.brand(), unsafe_allow_html=True)
 
+        pages = _visible_pages()
         current = st.session_state.get("page", PAGE_DASHBOARD)
-        if current not in NAV_PAGES:
+        if current not in pages:
             current = PAGE_DASHBOARD
+            st.session_state["page"] = current
         page = st.radio(
-            "Navigation",
-            NAV_PAGES,
-            index=NAV_PAGES.index(current),
+            "Navigation", pages, index=pages.index(current),
             label_visibility="collapsed",
         )
         if page != current:
@@ -171,7 +271,34 @@ def _render_sidebar() -> str:
 
         st.markdown(ui.divider(), unsafe_allow_html=True)
 
-        # Honest reporting of AI configuration -- no key means no reconstruction.
+        if user:
+            name = user.get("display_name") or user.get("email")
+            st.markdown('<div class="tr-k">Signed in as</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="tr-v" style="margin:.2rem 0 .1rem">{ui.esc(name)}</div>'
+                f'<div class="tr-note">{ui.esc(user.get("email"))}</div>',
+                unsafe_allow_html=True,
+            )
+            project_id = st.session_state.get("project_id")
+            if project_id:
+                try:
+                    actor = _principal(project_id)
+                except AccessDenied:
+                    actor = None
+                if actor is not None and actor.role:
+                    st.markdown(
+                        '<div style="margin-top:.5rem">'
+                        + ui.pill(f"Role: {actor.role_label}", "info")
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
+            st.markdown('<div style="height:.5rem"></div>', unsafe_allow_html=True)
+            if st.button("Sign out", width="stretch"):
+                st.session_state.clear()
+                st.rerun()
+
+        st.markdown(ui.divider(), unsafe_allow_html=True)
+
         llm = config.get_llm_config()
         st.markdown('<div class="tr-k">AI provider</div>', unsafe_allow_html=True)
         if llm.is_configured:
@@ -200,7 +327,6 @@ def _render_sidebar() -> str:
         )
 
     return st.session_state.get("page", PAGE_DASHBOARD)
-
 
 # --------------------------------------------------------------------------
 # Dashboard
@@ -248,6 +374,8 @@ def _render_project_card(project: dict, service: ProjectService) -> None:
     ]
     if source_count:
         facts.append(f"{extracted} extracted")
+    if project.get("member_role"):
+        facts.append(ROLE_LABELS.get(project["member_role"], project["member_role"]))
     facts.append(f"Created {format_timestamp(project.get('created_at'))}")
 
     st.markdown(
@@ -263,7 +391,7 @@ def _render_project_card(project: dict, service: ProjectService) -> None:
     _, action = st.columns([4, 1])
     with action:
         if st.button("Open", key=f"open_{project['id']}", width="stretch"):
-            _goto(PAGE_WORKSPACE, project["id"])
+            _open_project(project["id"])
     st.markdown('<div style="height:.7rem"></div>', unsafe_allow_html=True)
 
 
@@ -278,8 +406,10 @@ def _render_dashboard(service: ProjectService) -> None:
     if warn := st.session_state.pop("flash_warn", None):
         st.warning(warn)
 
+    # Only projects this user is a member of. A project they have no
+    # membership on is never fetched, not merely hidden from the list.
     try:
-        projects = service.list_projects()
+        projects = _auth_service().projects_for(_current_user())
     except DatabaseError as exc:
         st.error(f"Projects could not be loaded: {exc}")
         return
@@ -338,7 +468,7 @@ def _render_dashboard(service: ProjectService) -> None:
 
 def _render_demo_loader() -> None:
     demo = _demo_service()
-    if not demo.available():
+    if demo is None or not demo.available():
         return
 
     st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
@@ -362,7 +492,7 @@ def _render_demo_loader() -> None:
             st.rerun()
         else:
             st.session_state["flash"] = result.message
-            _goto(PAGE_WORKSPACE, result.project["id"])
+            _open_project(result.project["id"])
 
 
 # --------------------------------------------------------------------------
@@ -426,8 +556,8 @@ def _render_workspace(service: ProjectService) -> None:
 # --------------------------------------------------------------------------
 
 def _render_reconstruction_section(project: dict) -> None:
-    documents = _document_service()
-    reconstructions = _reconstruction_service()
+    documents = _document_service(project["id"])
+    reconstructions = _reconstruction_service(project["id"])
 
     st.markdown("## Reconstruction")
 
@@ -457,7 +587,9 @@ def _render_reconstruction_section(project: dict) -> None:
     with action:
         label = "Run reconstruction" if not latest else "Run again"
         disabled = not usable
-        if st.button(label, type="primary", disabled=disabled, width="stretch"):
+        if reconstructions.can_run() and st.button(
+            label, type="primary", disabled=disabled, width="stretch"
+        ):
             with st.spinner("Reading sources and checking evidence…"):
                 outcome = reconstructions.run(project)
             st.session_state["reconstruction_outcome"] = {
@@ -468,7 +600,12 @@ def _render_reconstruction_section(project: dict) -> None:
             }
             st.rerun()
 
-    if not usable:
+    if not reconstructions.can_run():
+        st.markdown(
+            ui.note("Your role cannot start a reconstruction on this project."),
+            unsafe_allow_html=True,
+        )
+    elif not usable:
         st.info(
             "Add at least one source with extractable text before running a "
             "reconstruction."
@@ -559,7 +696,17 @@ _PREVIEW_CHAR_LIMIT = 900
 
 
 def _render_upload_form(project: dict) -> None:
-    documents = _document_service()
+    documents = _document_service(project["id"])
+    if not documents.can_add_sources():
+        st.markdown("### Sources")
+        st.markdown(
+            ui.note(
+                "Your role can read the source documents but not add or remove "
+                "them."
+            ),
+            unsafe_allow_html=True,
+        )
+        return
     st.markdown("### Add sources")
     st.markdown(
         f'<div class="tr-note">Accepted: PDF, DOCX, TXT &middot; up to '
@@ -623,7 +770,7 @@ def _render_upload_outcomes() -> None:
 
 
 def _render_source_row(project: dict, source: dict) -> None:
-    documents = _document_service()
+    documents = _document_service(project["id"])
     status = source.get("extraction_status")
 
     facts = [
@@ -648,7 +795,9 @@ def _render_source_row(project: dict, source: dict) -> None:
             unsafe_allow_html=True,
         )
     with action:
-        if st.button("Remove", key=f"del_{source['id']}", width="stretch"):
+        if documents.can_add_sources() and st.button(
+            "Remove", key=f"del_{source['id']}", width="stretch"
+        ):
             ok, message = documents.delete_source(source["id"], project["id"])
             st.session_state["flash" if ok else "flash_warn"] = message
             st.rerun()
@@ -690,7 +839,18 @@ def _render_source_row(project: dict, source: dict) -> None:
 
 
 def _render_sources_section(project: dict) -> None:
-    documents = _document_service()
+    documents = _document_service(project["id"])
+    if not documents.can_read_sources():
+        st.markdown("## Sources")
+        st.markdown(
+            ui.note(
+                "Your role cannot open the source documents behind this "
+                "handover. You can still read the approved items and the "
+                "evidence quoted in them."
+            ),
+            unsafe_allow_html=True,
+        )
+        return
 
     if warn := st.session_state.pop("flash_warn", None):
         st.warning(warn)
@@ -834,6 +994,13 @@ def _render_review_item(item: dict, reconstruction_id: str) -> None:
             )
 
         _render_evidence_block(item)
+
+        if not reviews.can_review():
+            st.markdown(
+                ui.note("Your role is read-only on this handover."),
+                unsafe_allow_html=True,
+            )
+            return
 
         with st.expander("Edit this item or add a note"):
             new_text = st.text_area(
@@ -1051,15 +1218,19 @@ def _render_review(service: ProjectService) -> None:
             ),
             unsafe_allow_html=True,
         )
-        st.markdown(
-            ui.note(
+        if reviews.sees_only_approved():
+            summary = (
+                f"{progress.approved} approved item(s). Your role sees the "
+                "approved handover only."
+            )
+        elif progress.proposed:
+            summary = (
                 f"{progress.proposed} of {progress.total} item(s) still need a "
                 "decision. Only approved items are exported."
-                if progress.proposed
-                else f"Every one of the {progress.total} items has been reviewed."
-            ),
-            unsafe_allow_html=True,
-        )
+            )
+        else:
+            summary = f"Every one of the {progress.total} items has been reviewed."
+        st.markdown(ui.note(summary), unsafe_allow_html=True)
 
     st.markdown(ui.divider(), unsafe_allow_html=True)
     _render_verification_panel(latest)
@@ -1081,11 +1252,15 @@ def _render_review(service: ProjectService) -> None:
         st.success(flash)
 
     st.markdown(ui.divider(), unsafe_allow_html=True)
-    choice = st.radio(
-        "Show",
-        [_FILTER_ALL, _FILTER_UNREVIEWED, _FILTER_ATTENTION, _FILTER_APPROVED],
-        horizontal=True,
-    )
+    # Only offer filters that can return something for this role.
+    if reviews.sees_only_approved():
+        choice = _FILTER_ALL
+    else:
+        choice = st.radio(
+            "Show",
+            [_FILTER_ALL, _FILTER_UNREVIEWED, _FILTER_ATTENTION, _FILTER_APPROVED],
+            horizontal=True,
+        )
 
     shown = 0
     for _, label, items in reviews.grouped_items(latest["id"]):
@@ -1241,6 +1416,199 @@ def _render_export(service: ProjectService) -> None:
 
 
 # --------------------------------------------------------------------------
+# Authentication
+# --------------------------------------------------------------------------
+
+def _sign_in_user(user: dict) -> None:
+    st.session_state["user_id"] = str(user["id"])
+    st.session_state["page"] = PAGE_DASHBOARD
+    st.session_state.pop("project_id", None)
+    st.rerun()
+
+
+def _render_auth_screen() -> None:
+    """Sign in or create an account. Nothing else is reachable until then."""
+    st.markdown(
+        ui.page_head("Sign in to TRACE", config.APP_DESCRIPTION, eyebrow="TRACE"),
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
+
+    auth = _auth_service()
+    left, right = st.columns([1, 1], gap="large")
+
+    with left:
+        with st.form("sign_in"):
+            st.markdown("### Sign in")
+            email = st.text_input("Email", key="si_email")
+            password = st.text_input("Password", type="password", key="si_password")
+            submitted = st.form_submit_button("Sign in", type="primary")
+        if submitted:
+            try:
+                user = auth.authenticate(email, password)
+            except AuthError as exc:
+                st.error(str(exc))
+            else:
+                _sign_in_user(user)
+
+    with right:
+        with st.form("sign_up"):
+            st.markdown("### Create an account")
+            new_name = st.text_input("Your name", key="su_name")
+            new_email = st.text_input("Email", key="su_email")
+            new_password = st.text_input(
+                "Password", type="password", key="su_password",
+                help="At least 8 characters.",
+            )
+            created = st.form_submit_button("Create account")
+        if created:
+            try:
+                user = auth.register(new_email, new_password, new_name)
+            except AuthError as exc:
+                st.error(str(exc))
+            else:
+                _sign_in_user(user)
+
+    st.markdown(ui.divider(), unsafe_allow_html=True)
+    st.markdown(
+        '<div class="tr-panel">'
+        '<div class="tr-title">Roles in TRACE</div>'
+        '<div class="tr-desc" style="margin-top:.35rem">A project owner grants '
+        "each member one of these. The checks run on the server, so a role "
+        "without permission cannot retrieve the content by any route &mdash; "
+        "not merely have the button hidden.</div>"
+        + "".join(
+            f'<div style="margin-top:.7rem"><strong>{ui.esc(ROLE_LABELS[r])}</strong>'
+            f'<div class="tr-note">{ui.esc(ROLE_DESCRIPTIONS[r])}</div></div>'
+            for r in Role
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Shown only once the demo has been loaded on this deployment, so a judge
+    # can see the access checks refuse things rather than take it on trust.
+    if auth.find_by_email(DEMO_ACCOUNTS[0][0]) is not None:
+        st.markdown('<div style="height:.8rem"></div>', unsafe_allow_html=True)
+        lines = "\n".join(
+            f"- `{email}` — {ROLE_LABELS[role]}"
+            for email, _, role in DEMO_ACCOUNTS
+        )
+        st.info(
+            "**Demo accounts are loaded on this deployment.** Sign in as any of "
+            f"them with the password `{DEMO_PASSWORD}` to see the same project "
+            f"through a different role:\n\n{lines}\n\n"
+            "They exist only to demonstrate access control on synthetic data."
+        )
+
+
+# --------------------------------------------------------------------------
+# Access (members)
+# --------------------------------------------------------------------------
+
+def _render_access(service: ProjectService) -> None:
+    project_id = st.session_state.get("project_id")
+    if not project_id:
+        st.markdown(ui.page_head("Access", eyebrow="Access"), unsafe_allow_html=True)
+        st.info("Open a project from the Dashboard to see who can access it.")
+        return
+
+    try:
+        project = service.require_project(project_id)
+        actor = _principal(project_id)
+    except (ValidationError, AccessDenied) as exc:
+        st.error(str(exc))
+        return
+
+    auth = _auth_service()
+    st.markdown(
+        ui.page_head(
+            project["name"],
+            "Who can see this handover, and what each of them is allowed to do.",
+            eyebrow="Access",
+            tag=ui.demo_tag() if project.get("is_demo") else "",
+        ),
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div style="height:1.1rem"></div>', unsafe_allow_html=True)
+
+    if warn := st.session_state.pop("access_warn", None):
+        st.warning(warn)
+    if flash := st.session_state.pop("access_flash", None):
+        st.success(flash)
+
+    members = auth.list_members(project_id)
+    st.markdown(f"## Members ({len(members)})")
+    for member in members:
+        is_self = member["user_id"] == actor.user_id
+        row, action = st.columns([5, 1.2], vertical_alignment="center")
+        with row:
+            name = member.get("display_name") or member["email"]
+            st.markdown(
+                f'<div class="tr-title">{ui.esc(name)}'
+                + (' <span class="tr-chip">you</span>' if is_self else "")
+                + "</div>"
+                '<div class="tr-meta-row" style="margin-top:.35rem">'
+                + ui.pill(ROLE_LABELS.get(member["role"], member["role"]), "info")
+                + ui.chip(member["email"])
+                + "</div>"
+                f'<div class="tr-note" style="margin-top:.3rem">'
+                f'{ui.esc(ROLE_DESCRIPTIONS.get(member["role"], ""))}</div>',
+                unsafe_allow_html=True,
+            )
+        with action:
+            removable = (
+                actor.can(Capability.MANAGE_MEMBERS)
+                and not is_self
+                and member["role"] != str(Role.OWNER)
+            )
+            if removable and st.button(
+                "Remove", key=f"rm_{member['user_id']}", width="stretch"
+            ):
+                try:
+                    auth.revoke_access(actor, project_id, member["user_id"])
+                except AuthError as exc:
+                    st.session_state["access_warn"] = str(exc)
+                else:
+                    st.session_state["access_flash"] = f"Removed {member['email']}."
+                st.rerun()
+        st.markdown(ui.divider(), unsafe_allow_html=True)
+
+    if not actor.can(Capability.MANAGE_MEMBERS):
+        st.info(
+            "Only the project owner can change who has access. You are signed "
+            f"in as **{actor.role_label}**."
+        )
+        return
+
+    st.markdown("## Grant access")
+    with st.form("grant_role"):
+        st.markdown(
+            ui.note(
+                "The person needs a TRACE account already. Ask them to sign up, "
+                "then add them here."
+            ),
+            unsafe_allow_html=True,
+        )
+        email = st.text_input("Their email")
+        role = st.selectbox(
+            "Role", assignable_roles(),
+            format_func=lambda r: f"{ROLE_LABELS[r]} — {ROLE_DESCRIPTIONS[r]}",
+        )
+        granted = st.form_submit_button("Grant access", type="primary")
+    if granted:
+        try:
+            target = auth.grant_role(actor, project_id, email, role)
+        except (AuthError, AccessDenied) as exc:
+            st.session_state["access_warn"] = str(exc)
+        else:
+            st.session_state["access_flash"] = (
+                f"{target['email']} is now {ROLE_LABELS[role]} on this project."
+            )
+        st.rerun()
+
+
+# --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
 
@@ -1252,7 +1620,6 @@ def main() -> None:
         initial_sidebar_state="expanded",
     )
     st.markdown(ui.GLOBAL_CSS, unsafe_allow_html=True)
-
     st.session_state.setdefault("page", PAGE_DASHBOARD)
 
     try:
@@ -1264,16 +1631,36 @@ def main() -> None:
         )
         return
 
-    page = _render_sidebar()
-    if page == PAGE_WORKSPACE:
-        _render_workspace(service)
-    elif page == PAGE_REVIEW:
-        _render_review(service)
-    elif page == PAGE_EXPORT:
-        _render_export(service)
-    else:
-        _render_dashboard(service)
+    # Nothing is reachable without an account. This gates the interface; the
+    # services enforce their own checks regardless of what the UI shows.
+    if _current_user() is None:
+        st.session_state.pop("project_id", None)
+        _render_auth_screen()
+        return
 
+    page = _render_sidebar()
+    try:
+        if page == PAGE_WORKSPACE:
+            _render_workspace(service)
+        elif page == PAGE_REVIEW:
+            _render_review(service)
+        elif page == PAGE_EXPORT:
+            _render_export(service)
+        elif page == PAGE_ACCESS:
+            _render_access(service)
+        else:
+            _render_dashboard(service)
+    except AccessDenied as exc:
+        # A role reached a screen it cannot use. Say so plainly, rather than
+        # showing a traceback or, worse, partial content.
+        st.error(str(exc))
+        st.markdown(
+            ui.note(
+                "If you think you should have access, ask the project owner to "
+                "change your role."
+            ),
+            unsafe_allow_html=True,
+        )
 
 if __name__ == "__main__":
     main()

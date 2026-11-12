@@ -6,6 +6,8 @@ import sqlite3
 
 import pytest
 
+from tests.conftest import OWNER
+
 from database.repositories import (
     EvidenceRepository,
     HandoverItemRepository,
@@ -34,7 +36,7 @@ BRIEF = (
 def exportable(connection: sqlite3.Connection, isolated_storage, project: dict):
     """One approved, one rejected, one unreviewed item."""
     del isolated_storage
-    source = DocumentService(connection).upload(
+    source = DocumentService(connection, OWNER).upload(
         project["id"], "brief.txt", BRIEF.encode()
     ).source
     reconstruction_id = ReconstructionRepository(connection).create(
@@ -68,7 +70,7 @@ def exportable(connection: sqlite3.Connection, isolated_storage, project: dict):
     )
     connection.commit()
 
-    reviews = ReviewService(connection)
+    reviews = ReviewService(connection, OWNER)
     reviews.approve(approved, reconstruction_id)
     reviews.reject(rejected, reconstruction_id, note="No source supports this.")
 
