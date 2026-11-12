@@ -90,6 +90,44 @@ class ItemCategory(StrEnum):
     NEXT_ACTION = "next_action"
 
 
+class RelationType(StrEnum):
+    """How one handover item bears on another.
+
+    Deliberately few. Each one has to be something a source can actually
+    state, because a relationship is only drawn when a quotation supports it.
+    """
+
+    BLOCKS = "blocks"
+    DEPENDS_ON = "depends_on"
+    RESULTED_IN = "resulted_in"
+    ADDRESSES = "addresses"
+    OWNED_BY = "owned_by"
+    RELATES_TO = "relates_to"
+
+
+RELATION_LABELS: dict[str, str] = {
+    RelationType.BLOCKS: "blocks",
+    RelationType.DEPENDS_ON: "depends on",
+    RelationType.RESULTED_IN: "resulted in",
+    RelationType.ADDRESSES: "addresses",
+    RelationType.OWNED_BY: "owned by",
+    RelationType.RELATES_TO: "relates to",
+}
+
+RELATION_DESCRIPTIONS: dict[str, str] = {
+    RelationType.BLOCKS: "The first item is preventing the second from progressing.",
+    RelationType.DEPENDS_ON: "The first item cannot complete until the second does.",
+    RelationType.RESULTED_IN: "The first item caused or produced the second.",
+    RelationType.ADDRESSES: "The first item is the proposed response to the second.",
+    RelationType.OWNED_BY: "The first item is the responsibility named by the second.",
+    RelationType.RELATES_TO: "The sources connect these two, without saying how.",
+}
+
+
+def relation_label(value: str | None) -> str:
+    return RELATION_LABELS.get(value or "", (value or "relates to").replace("_", " "))
+
+
 class ReviewAction(StrEnum):
     EDITED = "edited"
     APPROVED = "approved"

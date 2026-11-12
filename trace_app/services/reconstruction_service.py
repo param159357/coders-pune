@@ -31,6 +31,7 @@ from database.repositories import (
     HandoverItemRepository,
     ProjectRepository,
     ReconstructionRepository,
+    RelationshipRepository,
     SourceRepository,
 )
 from trace_app.ai import offline_preview
@@ -53,9 +54,11 @@ from trace_app.services.evidence_service import (
     SourceIndex,
     VerificationReport,
     VerifiedItem,
+    VerifiedRelationship,
     normalise,
     verify_conflict,
     verify_item,
+    verify_relationship,
 )
 from trace_app.utils.text_chunking import (
     batch_chunks,
@@ -92,6 +95,18 @@ def _merge_drafts(drafts: list[ReconstructionDraft]) -> ReconstructionDraft:
     if len(drafts) == 1:
         return drafts[0]
 
+    # Each batch invents its own refs ("i1", "i2"), so the same handle means
+    # different items in different batches. Namespace them before merging, or
+    # a relationship from batch two would attach to batch one's item.
+    for position, draft in enumerate(drafts):
+        prefix = f"b{position}:"
+        for item in draft.items:
+            if item.ref:
+                item.ref = prefix + item.ref
+        for relationship in draft.relationships:
+            relationship.from_ref = prefix + relationship.from_ref
+            relationship.to_ref = prefix + relationship.to_ref
+
     merged_items: dict[tuple[str, str], Any] = {}
     for draft in drafts:
         for item in draft.items:
@@ -127,8 +142,13 @@ def _merge_drafts(drafts: list[ReconstructionDraft]) -> ReconstructionDraft:
                 seen_missing.add(key)
                 missing.append(entry)
 
+    relationships: list[Any] = []
+    for draft in drafts:
+        relationships.extend(draft.relationships)
+
     return ReconstructionDraft(
         items=list(merged_items.values()),
+        relationships=relationships,
         conflicts=conflicts,
         missing_information=missing,
     )
@@ -144,6 +164,7 @@ class ReconstructionService:
         self._reconstructions = ReconstructionRepository(connection)
         self._items = HandoverItemRepository(connection)
         self._evidence = EvidenceRepository(connection)
+        self._relationships = RelationshipRepository(connection)
         self._projects = ProjectRepository(connection)
 
     # ------------------------------------------------------------------ read
@@ -238,9 +259,14 @@ class ReconstructionService:
         # --- verification: nothing below trusts what produced the draft ---
         report = VerificationReport()
         verified_items = [verify_item(item, index, report) for item in draft.items]
+        item_count = len(verified_items)
         verified_items.extend(
             verify_conflict(conflict, index, report) for conflict in draft.conflicts
         )
+        verified_relationships = [
+            verify_relationship(relationship, index, report)
+            for relationship in draft.relationships
+        ]
         notes.extend(report.as_notes())
 
         if len(chunks) > len(batches):
@@ -258,6 +284,8 @@ class ReconstructionService:
             model_name=model_name,
             notes=notes,
             is_preview=use_preview,
+            draft_items=draft.items[:item_count],
+            relationships=verified_relationships,
             verification={
                 "evidence_total": report.evidence_total,
                 "evidence_verified": report.evidence_verified,
@@ -265,6 +293,9 @@ class ReconstructionService:
                 "excerpt_not_found": report.excerpt_not_found,
                 "locations_corrected": report.locations_corrected,
                 "items_downgraded": report.items_downgraded,
+                "relationships_proposed": report.relationships_proposed,
+                "relationships_verified": report.relationships_verified,
+                "relationships_discarded": report.relationships_discarded,
             },
         )
         self._projects.touch(project_id)
@@ -368,6 +399,8 @@ class ReconstructionService:
         notes: list[str],
         is_preview: bool,
         verification: dict[str, int] | None = None,
+        draft_items: list[Any] | None = None,
+        relationships: list[VerifiedRelationship] | None = None,
     ) -> str:
         """Write the reconstruction, its items, and its verified evidence.
 
@@ -395,6 +428,11 @@ class ReconstructionService:
             is_demo_preview=is_preview,
         )
 
+        # Maps the model's own refs onto TRACE's identifiers, so relationships
+        # can be attached. The refs themselves are never stored.
+        ref_to_item_id: dict[str, str] = {}
+        drafted = list(draft_items or [])
+
         with transaction(self._connection):
             for position, item in enumerate(verified_items):
                 item_id = self._items.create(
@@ -408,6 +446,9 @@ class ReconstructionService:
                     reviewer_note=" ".join(item.notes) if item.notes else None,
                     sort_order=position,
                 )
+                if position < len(drafted) and drafted[position].ref:
+                    ref_to_item_id[str(drafted[position].ref)] = item_id
+
                 for evidence in item.storable_evidence:
                     self._evidence.create(
                         handover_item_id=item_id,
@@ -421,6 +462,30 @@ class ReconstructionService:
                         verified=evidence.verified,
                         source_url=evidence.source_url,
                     )
+
+            for relationship in relationships or []:
+                source = ref_to_item_id.get(relationship.from_ref)
+                target = ref_to_item_id.get(relationship.to_ref)
+                # An endpoint that does not resolve means the model referred
+                # to an item it did not produce. Nothing to draw.
+                if not source or not target or source == target:
+                    continue
+                self._relationships.create(
+                    reconstruction_id=reconstruction_id,
+                    from_item_id=source,
+                    to_item_id=target,
+                    relation=relationship.relation,
+                    source_id=(
+                        relationship.evidence.source_id
+                        if relationship.evidence.storable
+                        else None
+                    ),
+                    location_label=relationship.evidence.location_label,
+                    excerpt=relationship.evidence.excerpt,
+                    source_url=relationship.evidence.source_url,
+                    verified=relationship.verified,
+                    reason=relationship.reason,
+                )
 
         return reconstruction_id
 
@@ -445,6 +510,14 @@ class ReconstructionService:
             return {}
         counts = payload.get("verification")
         return counts if isinstance(counts, dict) else {}
+
+    def relationships(self, reconstruction_id: str) -> list[dict[str, Any]]:
+        """Drawable relationships for a reconstruction."""
+        require(self._principal, Capability.VIEW_APPROVED)
+        return self._relationships.list_verified(reconstruction_id)
+
+    def relationship_counts(self, reconstruction_id: str) -> tuple[int, int]:
+        return self._relationships.count_for_reconstruction(reconstruction_id)
 
     def missing_information(self, reconstruction: dict[str, Any]) -> list[str]:
         try:

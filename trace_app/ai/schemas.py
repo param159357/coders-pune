@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from trace_app.models import EvidenceStatus, ItemCategory
+from trace_app.models import EvidenceStatus, ItemCategory, RelationType
 
 MAX_ITEM_TEXT = 800
 MAX_EXCERPT = 400
@@ -76,6 +76,10 @@ class HandoverItemDraft(BaseModel):
 
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
+    #: A short handle the model assigns so relationships can refer to this
+    #: item within the same reply. It is never stored: after validation the
+    #: refs are mapped onto TRACE's own identifiers and discarded.
+    ref: str | None = Field(default=None, max_length=32)
     category: ItemCategory
     text: str = Field(min_length=1, max_length=MAX_ITEM_TEXT)
     evidence: list[EvidenceRef] = Field(default_factory=list, max_length=12)
@@ -109,6 +113,33 @@ class HandoverItemDraft(BaseModel):
         return candidate
 
 
+class RelationshipDraft(BaseModel):
+    """A claimed link between two items, with the quotation supporting it.
+
+    Both endpoints are the model's own ``ref`` handles from the same reply. A
+    relationship whose endpoints do not resolve, or whose quotation does not
+    verify, is discarded rather than drawn.
+    """
+
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    from_ref: str = Field(min_length=1, max_length=32)
+    to_ref: str = Field(min_length=1, max_length=32)
+    relation: RelationType
+    evidence: EvidenceRef
+
+    @field_validator("relation", mode="before")
+    @classmethod
+    def _default_unknown_relation(cls, value):
+        """An unrecognised relation becomes the weakest one, not a guess."""
+        if value is None:
+            return RelationType.RELATES_TO
+        candidate = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+        if candidate not in set(RelationType):
+            return RelationType.RELATES_TO
+        return candidate
+
+
 class ConflictNote(BaseModel):
     """A disagreement between sources. Both sides are preserved, never resolved."""
 
@@ -139,6 +170,9 @@ class ReconstructionDraft(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     items: list[HandoverItemDraft] = Field(default_factory=list, max_length=MAX_ITEMS)
+    relationships: list[RelationshipDraft] = Field(
+        default_factory=list, max_length=MAX_ITEMS
+    )
     conflicts: list[ConflictNote] = Field(default_factory=list, max_length=40)
     missing_information: list[str] = Field(default_factory=list, max_length=40)
 
@@ -163,6 +197,7 @@ class ReconstructionDraft(BaseModel):
 JSON_SHAPE_HINT = """{
   "items": [
     {
+      "ref": "i1",
       "category": "decision",
       "text": "One concise, self-contained statement.",
       "evidence": [
@@ -173,6 +208,11 @@ JSON_SHAPE_HINT = """{
       "owner": null,
       "due_date": null
     }
+  ],
+  "relationships": [
+    {"from_ref": "i2", "to_ref": "i3", "relation": "blocks",
+     "evidence": {"source_id": "src_1a2b3c4d", "location": "page 4",
+                  "excerpt": "A short exact quotation stating the link."}}
   ],
   "conflicts": [
     {"description": "Source A says X, source B says Y.",

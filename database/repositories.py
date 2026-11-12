@@ -664,3 +664,83 @@ class MembershipRepository:
                 (project_id,),
             ).fetchone()["c"]
         )
+
+
+
+class RelationshipRepository:
+    """Evidence-backed links between handover items.
+
+    Only verified relationships are returned for display: an unsupported link
+    is kept for the audit trail but never drawn, because a line between two
+    boxes asserts a claim the sources did not make.
+    """
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def create(
+        self,
+        reconstruction_id: str,
+        from_item_id: str,
+        to_item_id: str,
+        relation: str,
+        source_id: str | None = None,
+        location_label: str | None = None,
+        excerpt: str | None = None,
+        source_url: str | None = None,
+        verified: bool = False,
+        reason: str | None = None,
+    ) -> str:
+        relationship_id = new_id("rel")
+        self._connection.execute(
+            "INSERT INTO item_relationships (id, reconstruction_id,"
+            " from_item_id, to_item_id, relation, source_id, location_label,"
+            " excerpt, source_url, verified, reason, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                relationship_id,
+                reconstruction_id,
+                from_item_id,
+                to_item_id,
+                str(relation),
+                source_id,
+                location_label,
+                excerpt,
+                source_url,
+                1 if verified else 0,
+                reason,
+                utc_now(),
+            ),
+        )
+        return relationship_id
+
+    def list_verified(self, reconstruction_id: str) -> list[dict[str, Any]]:
+        """Drawable relationships, joined to both endpoints and the source."""
+        rows = self._connection.execute(
+            """
+            SELECT r.*,
+                   a.text     AS from_text,  a.category AS from_category,
+                   a.review_status AS from_review_status,
+                   b.text     AS to_text,    b.category AS to_category,
+                   b.review_status AS to_review_status,
+                   s.display_name AS source_display_name
+            FROM item_relationships r
+            JOIN handover_items a ON a.id = r.from_item_id
+            JOIN handover_items b ON b.id = r.to_item_id
+            LEFT JOIN sources s ON s.id = r.source_id
+            WHERE r.reconstruction_id = ? AND r.verified = 1
+            ORDER BY r.rowid ASC
+            """,
+            (reconstruction_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_for_reconstruction(self, reconstruction_id: str) -> tuple[int, int]:
+        """``(verified, total)`` so the UI can say what was discarded."""
+        row = self._connection.execute(
+            "SELECT COUNT(*) AS total,"
+            " SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END) AS ok"
+            " FROM item_relationships WHERE reconstruction_id = ?",
+            (reconstruction_id,),
+        ).fetchone()
+        return int(row["ok"] or 0), int(row["total"] or 0)

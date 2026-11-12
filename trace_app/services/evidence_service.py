@@ -20,7 +20,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from trace_app.ai.schemas import ConflictNote, EvidenceRef, HandoverItemDraft
+from trace_app.ai.schemas import (
+    ConflictNote,
+    EvidenceRef,
+    HandoverItemDraft,
+    RelationshipDraft,
+)
 from trace_app.models import EvidenceStatus, ItemCategory
 from trace_app.services.extraction_service import Segment, segments_from_json
 
@@ -89,6 +94,21 @@ class VerifiedItem:
 
 
 @dataclass
+class VerifiedRelationship:
+    """A claimed link between two items, after checking its quotation."""
+
+    from_ref: str
+    to_ref: str
+    relation: str
+    evidence: VerifiedEvidence
+    reason: str | None = None
+
+    @property
+    def verified(self) -> bool:
+        return self.evidence.verified and self.evidence.storable
+
+
+@dataclass
 class VerificationReport:
     """Aggregate counts, surfaced to the user so the checking is visible."""
 
@@ -98,6 +118,9 @@ class VerificationReport:
     excerpt_not_found: int = 0
     locations_corrected: int = 0
     items_downgraded: int = 0
+    relationships_proposed: int = 0
+    relationships_verified: int = 0
+    relationships_discarded: int = 0
 
     def as_notes(self) -> list[str]:
         notes: list[str] = []
@@ -126,6 +149,17 @@ class VerificationReport:
             notes.append(
                 f"{self.items_downgraded} item(s) had their evidence status "
                 "lowered because the evidence did not hold up."
+            )
+        if self.relationships_proposed:
+            notes.append(
+                f"{self.relationships_proposed} relationship(s) were proposed "
+                f"between items; {self.relationships_verified} were supported "
+                "by a quotation and are shown on the map."
+            )
+        if self.relationships_discarded:
+            notes.append(
+                f"{self.relationships_discarded} relationship(s) were "
+                "discarded because nothing in the sources stated the link."
             )
         return notes
 
@@ -337,3 +371,42 @@ def verify_conflict(
             "not decide which is correct."
         ],
     )
+
+
+def verify_relationship(
+    draft: RelationshipDraft,
+    index: SourceIndex,
+    report: VerificationReport,
+) -> VerifiedRelationship:
+    """Check the quotation a claimed link rests on.
+
+    A line drawn between two items asserts that one bears on the other. That
+    is a factual claim about the project, so it is held to the same standard
+    as any other: a quotation that is not in the sources means the link is not
+    drawn.
+    """
+    report.relationships_proposed += 1
+    evidence = verify_reference(draft.evidence, index, report)
+
+    reason = None
+    if not evidence.storable:
+        reason = (
+            "The source named for this link does not exist in this project."
+        )
+    elif not evidence.verified:
+        reason = (
+            "No quotation in the sources states this link, so it is not drawn."
+        )
+
+    relationship = VerifiedRelationship(
+        from_ref=str(draft.from_ref),
+        to_ref=str(draft.to_ref),
+        relation=str(draft.relation),
+        evidence=evidence,
+        reason=reason,
+    )
+    if relationship.verified:
+        report.relationships_verified += 1
+    else:
+        report.relationships_discarded += 1
+    return relationship

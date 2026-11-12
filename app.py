@@ -12,12 +12,14 @@ import streamlit as st
 import config
 from database.connection import DatabaseError, get_connection
 from database.schema import initialise_database
-from trace_app import ui
+from trace_app import relationship_map, ui
 from trace_app.models import (
+    RELATION_DESCRIPTIONS,
     ExtractionStatus,
     ReconstructionStatus,
     format_timestamp,
     reconstruction_label,
+    relation_label,
 )
 from trace_app.security.authz import (
     AccessDenied,
@@ -53,9 +55,11 @@ PAGE_DASHBOARD = "Dashboard"
 PAGE_WORKSPACE = "Project Workspace"
 PAGE_REVIEW = "Review Handover"
 PAGE_EXPORT = "Export"
+PAGE_MAP = "Knowledge Map"
 PAGE_ACCESS = "Access"
 NAV_PAGES = [
-    PAGE_DASHBOARD, PAGE_WORKSPACE, PAGE_REVIEW, PAGE_EXPORT, PAGE_ACCESS,
+    PAGE_DASHBOARD, PAGE_WORKSPACE, PAGE_REVIEW, PAGE_MAP, PAGE_EXPORT,
+    PAGE_ACCESS,
 ]
 
 
@@ -251,6 +255,7 @@ def _visible_pages() -> list[str]:
         pages.append(PAGE_WORKSPACE)
     if actor.can(Capability.VIEW_APPROVED):
         pages.append(PAGE_REVIEW)
+        pages.append(PAGE_MAP)
     if actor.can(Capability.EXPORT):
         pages.append(PAGE_EXPORT)
     pages.append(PAGE_ACCESS)
@@ -1244,6 +1249,12 @@ def _render_demo_pointers(project: dict) -> None:
             )
 
 
+def category_label_for(value) -> str:
+    from trace_app.models import category_label
+
+    return category_label(str(value))
+
+
 def _passes_filter(item: dict, choice: str) -> bool:
     if choice == _FILTER_UNREVIEWED:
         return item["review_status"] == "proposed"
@@ -1371,6 +1382,230 @@ def _render_review(service: ProjectService) -> None:
 
     if shown == 0:
         st.info("No items match this filter.")
+
+
+# --------------------------------------------------------------------------
+# Knowledge relationship map
+# --------------------------------------------------------------------------
+
+def _render_focused_item(reviews, latest: dict, focus_id: str, edges: list) -> None:
+    """The item a reader clicked, with its evidence and every link it is in."""
+    item = next(
+        (i for i in reviews.list_items(latest["id"]) if i["id"] == focus_id), None
+    )
+    if item is None:
+        st.markdown(
+            ui.note(
+                "That item is not in this reconstruction, or your role cannot "
+                "see it."
+            ),
+            unsafe_allow_html=True,
+        )
+        return
+
+    st.markdown(
+        '<div class="tr-card tr-card-pad">'
+        '<div class="tr-meta-row">'
+        + ui.evidence_pill(item["evidence_status"])
+        + ui.review_pill(item["review_status"])
+        + ui.chip(category_label_for(item["category"]))
+        + "</div>"
+        f'<div class="tr-item-text">{ui.esc(item["text"])}</div></div>',
+        unsafe_allow_html=True,
+    )
+    _render_evidence_block(item)
+
+    involved = [
+        edge
+        for edge in edges
+        if focus_id in (edge["from_item_id"], edge["to_item_id"])
+    ]
+    if not involved:
+        return
+
+    st.markdown(
+        f'<div class="tr-k" style="margin-top:.9rem">Links involving this item '
+        f"({len(involved)})</div>",
+        unsafe_allow_html=True,
+    )
+    for edge in involved:
+        outgoing = edge["from_item_id"] == focus_id
+        other = edge["to_text"] if outgoing else edge["from_text"]
+        phrase = (
+            f"This item {relation_label(edge['relation'])}:"
+            if outgoing
+            else f"{relation_label(edge['relation']).capitalize()} this item:"
+        )
+        st.markdown(
+            f'<div class="tr-card" style="margin-top:.5rem">'
+            f'<div class="tr-note">{ui.esc(phrase)}</div>'
+            f'<div class="tr-desc" style="margin:.25rem 0 .4rem">'
+            f"{ui.esc(other)}</div>"
+            + ui.source_ref(
+                edge.get("source_display_name") or "unknown source",
+                edge.get("location_label") or "location not recorded",
+            )
+            + (
+                f'<a class="tr-note" href="{ui.esc(edge["source_url"])}" '
+                'target="_blank" rel="noopener" style="margin-left:.5rem">'
+                "View on GitHub</a>"
+                if edge.get("source_url")
+                else ""
+            )
+            + ui.quote(edge.get("excerpt") or "", verified=True)
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def _render_map(service: ProjectService) -> None:
+    project_id = st.session_state.get("project_id")
+    if not project_id:
+        st.markdown(
+            ui.page_head("Knowledge map", eyebrow="Knowledge map"),
+            unsafe_allow_html=True,
+        )
+        st.info("Open a project from the Dashboard to see its knowledge map.")
+        return
+
+    try:
+        project = service.require_project(project_id)
+    except ValidationError as exc:
+        st.error(str(exc))
+        return
+
+    reconstructions = _reconstruction_service(project_id)
+    reviews = _review_service(project_id)
+    latest = reconstructions.latest(project_id)
+
+    st.markdown(
+        ui.page_head(
+            project["name"],
+            "How the findings connect. Every line is a claim a source states \u2014 "
+            "pick any item below to read the evidence behind it.",
+            eyebrow="Knowledge map",
+            tag=ui.demo_tag() if project.get("is_demo") else "",
+        ),
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div style="height:1.1rem"></div>', unsafe_allow_html=True)
+    _render_stepper(project)
+
+    if latest is None or str(latest["status"]) != ReconstructionStatus.DRAFT_READY:
+        st.info(
+            "There is no draft yet. Run a reconstruction from the Project "
+            "Workspace first."
+        )
+        return
+
+    edges = reconstructions.relationships(latest["id"])
+    drawn, proposed = reconstructions.relationship_counts(latest["id"])
+
+    if not edges:
+        st.markdown(
+            '<div class="tr-card tr-card-pad">'
+            '<div class="tr-title">No relationships were evidenced</div>'
+            '<div class="tr-desc" style="margin-top:.35rem">Nothing in these '
+            "sources states how the findings connect, so there is nothing to "
+            "draw. TRACE does not infer links to fill the space \u2014 a line "
+            "here would be a guess presented as a finding.</div>"
+            + (
+                '<div class="tr-note" style="margin-top:.6rem">'
+                f"{proposed} link(s) were proposed and discarded because no "
+                "quotation supported them.</div>"
+                if proposed
+                else ""
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    st.markdown(
+        ui.stats(
+            [
+                ("Links drawn", drawn),
+                ("Discarded as unsupported", max(proposed - drawn, 0)),
+                ("Items connected", len({e["from_item_id"] for e in edges}
+                                        | {e["to_item_id"] for e in edges})),
+            ]
+        ),
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        ui.note(
+            "Only links a source states are drawn. Of the "
+            f"{proposed} proposed, {drawn} carried a quotation that matched "
+            "the source it named."
+        ),
+        unsafe_allow_html=True,
+    )
+
+    # Focus is kept in session state. An anchor inside the SVG would cause a
+    # full page navigation, which resets Streamlit's session and signs the
+    # reader out -- found by clicking a node and landing back on sign-in.
+    st.query_params.clear()
+    focus_key = f"map_focus_{latest['id']}"
+    focus_id = st.session_state.get(focus_key)
+    data = relationship_map.build_map(edges)
+    svg = relationship_map.render_svg(data, focus_id=focus_id)
+
+    st.markdown(
+        f'<div style="overflow-x:auto;background:#FFFFFF;border:1px solid '
+        f'var(--tr-line);border-radius:12px;padding:.6rem;margin-top:.7rem">'
+        f"{svg}</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        relationship_map.legend({e["relation"] for e in edges}),
+        unsafe_allow_html=True,
+    )
+
+    # Pick an item to inspect. Every node on the map is listed, so each one is
+    # navigable through to its evidence.
+    node_labels = {
+        node.item_id: f"{category_label_for(node.category)}: {' '.join(node.lines)}"
+        for node in sorted(data.nodes, key=lambda n: (n.lane, n.row))
+    }
+    options = ["\u2014 none \u2014"] + list(node_labels)
+    current = options.index(focus_id) if focus_id in node_labels else 0
+    chosen = st.selectbox(
+        "Inspect an item",
+        options,
+        index=current,
+        format_func=lambda key: (
+            "\u2014 none \u2014" if key.startswith("\u2014") else node_labels[key]
+        ),
+    )
+    selected = None if chosen.startswith("\u2014") else chosen
+    if selected != focus_id:
+        if selected:
+            st.session_state[focus_key] = selected
+        else:
+            st.session_state.pop(focus_key, None)
+        st.rerun()
+
+    if focus_id:
+        st.markdown(ui.divider(), unsafe_allow_html=True)
+        st.markdown("## Focused item")
+        _render_focused_item(reviews, latest, focus_id, edges)
+    else:
+        st.markdown(
+            ui.note(
+                "Choose an item above to see its evidence and every link it "
+                "takes part in. The map highlights it."
+            ),
+            unsafe_allow_html=True,
+        )
+
+    with st.expander("What the colours mean"):
+        for relation, description in RELATION_DESCRIPTIONS.items():
+            st.markdown(
+                f'<div class="tr-note" style="margin-bottom:.4rem">'
+                f"<strong>{ui.esc(relation_label(relation))}</strong> "
+                f"&mdash; {ui.esc(description)}</div>",
+                unsafe_allow_html=True,
+            )
 
 
 # --------------------------------------------------------------------------
@@ -1737,6 +1972,8 @@ def main() -> None:
             _render_workspace(service)
         elif page == PAGE_REVIEW:
             _render_review(service)
+        elif page == PAGE_MAP:
+            _render_map(service)
         elif page == PAGE_EXPORT:
             _render_export(service)
         elif page == PAGE_ACCESS:

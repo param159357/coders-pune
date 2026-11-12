@@ -170,6 +170,26 @@ Only what a handover needs is collected: identifier, title, message or body,
 author login, date and link. No diffs, no file contents, and no email
 addresses or other profile data.
 
+### The knowledge relationship map
+
+Handover items are a flat list by category, which hides the thing a reader
+most needs: that a specific blocker is what holds up a specific task, which is
+itself waiting on an external approval. TRACE models those links and draws
+them.
+
+A relationship carries its own quotation and is verified exactly as an item's
+evidence is. **A link with no source support is not drawn** — a line between
+two boxes asserts a causal claim, and an unsupported one would be a guess
+presented as a finding. The map reports how many were proposed and how many
+were discarded, so the gap is visible rather than hidden.
+
+Six relation types, each something a source can actually state: *blocks*,
+*depends on*, *resulted in*, *addresses*, *owned by*, *relates to*. Items are
+laid out in lanes by category, and the layout is deterministic — the same
+reconstruction always draws the same picture, which matters when comparing two
+runs. Selecting any item highlights it, shows its evidence, and lists every
+link it takes part in with the quotation behind each one.
+
 ### Accounts and roles
 
 Every screen is behind sign-in, and each project has its own membership list.
@@ -371,6 +391,11 @@ Stated plainly, because an honest limitation is worth more than an overclaim.
 - **Accounts are local to each deployment.** TRACE stores its own accounts
   (scrypt-hashed passwords); there is no SSO, no email verification and no
   password reset yet.
+- **Refreshing the page signs you out.** Sessions live in Streamlit's session
+  state, which a browser reload clears. Nothing is lost but the sign-in.
+- **The relationship map depends on the model finding links.** It draws only
+  what a source states, so sparse or narrative documents can legitimately
+  produce an empty map. The map says so rather than inventing connections.
 - **SQLite on ephemeral hosting.** Streamlit Community Cloud does not guarantee
   a persistent disk. Data can be lost when the container restarts. TRACE does
   not promise long-term persistence.

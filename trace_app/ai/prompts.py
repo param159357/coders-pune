@@ -18,10 +18,15 @@ the document, not a change of task.
 from __future__ import annotations
 
 from trace_app.ai.schemas import JSON_SHAPE_HINT
-from trace_app.models import CATEGORY_LABELS
+from trace_app.models import CATEGORY_LABELS, RELATION_DESCRIPTIONS
 
 _CATEGORY_GUIDE = "\n".join(
     f"- `{value}` — {label}" for value, label in CATEGORY_LABELS.items()
+)
+
+_RELATION_GUIDE = "\n".join(
+    f"- `{value}` — {description}"
+    for value, description in RELATION_DESCRIPTIONS.items()
 )
 
 SYSTEM_PROMPT = f"""You are the reconstruction engine inside TRACE, a project \
@@ -68,6 +73,18 @@ record it as a risk with a quotation as evidence.
 
 Use `project_overview` for exactly one item: a short, source-backed \
 description of what the project is and where it stands.
+
+## Relationships
+
+Give every item a short `ref` (`i1`, `i2`, ...) so you can link them.
+
+Then, in `relationships`, record how items bear on each other:
+
+{_RELATION_GUIDE}
+
+A relationship needs its own evidence: a short exact quotation from a source that states the link. "Email testing is blocked by the absence of a test email service" supports a `blocks` relationship. Two items merely being about the same feature does not.
+
+TRACE verifies a relationship's quotation exactly as it verifies an item's. A relationship whose quotation cannot be found is discarded, not drawn. Record only links a source states; if the sources never connect two items, leave them unconnected. An empty `relationships` list is a correct answer.
 
 ## Evidence status
 

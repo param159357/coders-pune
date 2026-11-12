@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 
 #: Bump this and add a matching block in ``_MIGRATIONS`` for every change.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -195,9 +195,43 @@ _MIGRATION_5 = """
 ALTER TABLE evidence ADD COLUMN source_url TEXT;
 """
 
+# Version 6 records evidence-backed relationships between handover items --
+# which blocker holds up which task, which decision caused which work, what a
+# dependency is waiting on.
+#
+# A relationship carries its own supporting quotation and a verified flag,
+# checked against the real source exactly as an item's evidence is. Only
+# verified relationships are drawn: a line between two boxes asserts a causal
+# claim, and an unsupported one would be a decorative guess.
+_MIGRATION_6 = """
+CREATE TABLE IF NOT EXISTS item_relationships (
+    id                TEXT PRIMARY KEY,
+    reconstruction_id TEXT NOT NULL,
+    from_item_id      TEXT NOT NULL,
+    to_item_id        TEXT NOT NULL,
+    relation          TEXT NOT NULL,
+    source_id         TEXT,
+    location_label    TEXT,
+    excerpt           TEXT,
+    source_url        TEXT,
+    verified          INTEGER NOT NULL DEFAULT 0,
+    reason            TEXT,
+    created_at        TEXT NOT NULL,
+    FOREIGN KEY (reconstruction_id) REFERENCES reconstructions (id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (from_item_id) REFERENCES handover_items (id) ON DELETE CASCADE,
+    FOREIGN KEY (to_item_id) REFERENCES handover_items (id) ON DELETE CASCADE,
+    FOREIGN KEY (source_id) REFERENCES sources (id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_relationships_reconstruction
+    ON item_relationships (reconstruction_id);
+"""
+
 #: Ordered migrations. Index 0 takes the database from version 0 to 1.
 _MIGRATIONS = [
     _MIGRATION_1, _MIGRATION_2, _MIGRATION_3, _MIGRATION_4, _MIGRATION_5,
+    _MIGRATION_6,
 ]
 
 
