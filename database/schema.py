@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 
 #: Bump this and add a matching block in ``_MIGRATIONS`` for every change.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -160,8 +160,45 @@ CREATE INDEX IF NOT EXISTS idx_members_user ON project_members (user_id);
 ALTER TABLE projects ADD COLUMN owner_id TEXT REFERENCES users (id);
 """
 
+# Version 4 lets a source come from somewhere other than an upload. An
+# ingested commit, pull request or issue is stored as an ordinary source row,
+# so evidence verification, review and export all work on it unchanged.
+#
+# No access token is stored. The token is used for one fetch and discarded;
+# re-syncing asks for it again. A stored token would be a credential at rest
+# in a file the operator may not be treating as a secret.
+_MIGRATION_4 = """
+ALTER TABLE sources ADD COLUMN origin TEXT NOT NULL DEFAULT 'upload';
+ALTER TABLE sources ADD COLUMN origin_url TEXT;
+
+CREATE TABLE IF NOT EXISTS repository_links (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL,
+    owner          TEXT NOT NULL,
+    repo           TEXT NOT NULL,
+    html_url       TEXT,
+    connected_at   TEXT NOT NULL,
+    connected_by   TEXT,
+    last_synced_at TEXT,
+    last_sync_note TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_links_project_repo
+    ON repository_links (project_id, owner, repo);
+"""
+
+# Version 5 lets a piece of evidence carry the public address of the thing it
+# quotes, so a citation of a commit or issue is clickable in the interface and
+# in the exported report. Null for uploaded documents, which have no address.
+_MIGRATION_5 = """
+ALTER TABLE evidence ADD COLUMN source_url TEXT;
+"""
+
 #: Ordered migrations. Index 0 takes the database from version 0 to 1.
-_MIGRATIONS = [_MIGRATION_1, _MIGRATION_2, _MIGRATION_3]
+_MIGRATIONS = [
+    _MIGRATION_1, _MIGRATION_2, _MIGRATION_3, _MIGRATION_4, _MIGRATION_5,
+]
 
 
 def _current_version(connection: sqlite3.Connection) -> int:

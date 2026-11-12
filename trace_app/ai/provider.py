@@ -47,10 +47,14 @@ RETRY_BACKOFF_SECONDS = (2.0, 5.0)
 #: development. Each of these was verified to answer this workload. The model
 #: that actually produced a draft is recorded on the reconstruction, so a
 #: report never names a model that did not write it.
+# Only models verified to answer this workload through the SDK's API version.
+# "gemini-flash-latest" was in this list and removed: the alias resolves for
+# the REST endpoint but returns 404 "not found for API version v1" through the
+# client, so it wasted a step in the chain every time the primary was down.
 DEFAULT_FALLBACK_MODELS = (
     "gemini-3.5-flash",
-    "gemini-flash-latest",
     "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
 )
 
 

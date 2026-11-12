@@ -137,9 +137,13 @@ def _evidence_lines(item: dict[str, Any]) -> list[str]:
     for row in item.get("evidence") or []:
         state = "verified" if row.get("verified") else "NOT VERIFIED"
         location = row.get("location_label") or "location not recorded"
+        # A citation of a commit, pull request or issue carries its permanent
+        # address, so a reader can open the exact thing the claim rests on.
+        link = row.get("source_url")
+        suffix = f" <{redact(link)}>" if link else ""
         lines.append(
             f"{redact(row.get('source_display_name'))} — {redact(location)} "
-            f"({state}): “{redact(row.get('excerpt'))}”"
+            f"({state}): “{redact(row.get('excerpt'))}”{suffix}"
         )
     return lines
 

@@ -150,6 +150,26 @@ model claimed, never raised:
 An owner or a due date is dropped entirely unless something verified supports
 it. A model that labels everything "supported" therefore gains nothing by it.
 
+### Ingesting a GitHub repository
+
+A project can pull in a repository's recent commits, pull requests and issues.
+Each record becomes an ordinary source, so everything downstream applies to it
+unchanged: the same chunking, the same Pydantic validation, the same evidence
+verification, the same review and export. A claim about the code is held to
+exactly the standard a claim about a PDF is — the quoted text must actually
+appear in the ingested record — and each citation carries the permanent GitHub
+URL of the commit or issue it quotes, in the interface and in the report.
+
+**A public repository needs no token.** For a private one, supply a
+fine-grained personal access token with read access to Contents, Issues and
+Pull requests. **The token is never stored** — it is used for one fetch and
+discarded, and re-syncing asks again. A test asserts the token appears in no
+table.
+
+Only what a handover needs is collected: identifier, title, message or body,
+author login, date and link. No diffs, no file contents, and no email
+addresses or other profile data.
+
 ### Accounts and roles
 
 Every screen is behind sign-in, and each project has its own membership list.
@@ -361,8 +381,8 @@ Stated plainly, because an honest limitation is worth more than an overclaim.
   trusted on its own, as the leading bytes are checked too.
 - **Deduplication is byte-exact.** Two files with identical content are caught,
   but a lightly edited near-duplicate is not.
-- **No external integrations.** Slack, GitHub, Teams, and email ingestion are
-  not implemented.
+- **Integrations are GitHub only.** Slack, Teams and email ingestion are not
+  implemented.
 - **Evidence matching is exact, not semantic.** A quotation must occur in the
   source after whitespace and case are normalised. A correctly paraphrased
   claim is therefore marked unsupported rather than accepted — a deliberate

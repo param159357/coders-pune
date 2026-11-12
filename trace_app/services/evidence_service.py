@@ -54,6 +54,9 @@ class VerifiedEvidence:
     location_corrected: bool = False
     start_offset: int | None = None
     end_offset: int | None = None
+    #: Public address of the exact record quoted, when the source has one
+    #: (a commit, pull request or issue). None for uploaded documents.
+    source_url: str | None = None
 
     @property
     def storable(self) -> bool:
@@ -267,6 +270,7 @@ def verify_reference(
         location_corrected=corrected,
         start_offset=segment.start_offset if segment else None,
         end_offset=segment.end_offset if segment else None,
+        source_url=getattr(segment, "url", None) if segment else None,
     )
 
 

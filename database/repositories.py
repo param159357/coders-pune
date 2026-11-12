@@ -127,7 +127,7 @@ class SourceRepository:
     _SUMMARY_COLUMNS = (
         "id, project_id, display_name, stored_name, file_type, file_size,"
         " uploaded_at, extraction_status, extraction_error, extraction_notes,"
-        " char_count, page_count, content_hash"
+        " char_count, page_count, content_hash, origin, origin_url"
     )
 
     def __init__(self, connection: sqlite3.Connection) -> None:
@@ -149,6 +149,8 @@ class SourceRepository:
         page_count: int | None = None,
         content_hash: str | None = None,
         source_id: str | None = None,
+        origin: str = "upload",
+        origin_url: str | None = None,
     ) -> dict[str, Any]:
         new_source_id = source_id or new_id("src")
         with transaction(self._connection):
@@ -156,8 +158,9 @@ class SourceRepository:
                 "INSERT INTO sources (id, project_id, display_name, stored_name,"
                 " file_type, file_size, uploaded_at, extraction_status,"
                 " extraction_error, extraction_notes, extracted_text,"
-                " segments_json, char_count, page_count, content_hash)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " segments_json, char_count, page_count, content_hash,"
+                " origin, origin_url)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_source_id,
                     project_id,
@@ -174,6 +177,8 @@ class SourceRepository:
                     char_count,
                     page_count,
                     content_hash,
+                    origin,
+                    origin_url,
                 ),
             )
         stored = self.get(new_source_id, project_id)
@@ -401,12 +406,13 @@ class EvidenceRepository:
         end_offset: int | None = None,
         support_note: str | None = None,
         verified: bool = False,
+        source_url: str | None = None,
     ) -> str:
         evidence_id = new_id("ev")
         self._connection.execute(
             "INSERT INTO evidence (id, handover_item_id, source_id,"
             " location_label, excerpt, start_offset, end_offset, support_note,"
-            " verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " verified, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 evidence_id,
                 handover_item_id,
@@ -417,6 +423,7 @@ class EvidenceRepository:
                 end_offset,
                 support_note,
                 1 if verified else 0,
+                source_url,
             ),
         )
         return evidence_id
@@ -428,7 +435,8 @@ class EvidenceRepository:
         placeholders = ", ".join("?" for _ in item_ids)
         rows = self._connection.execute(
             "SELECT e.*, s.display_name AS source_display_name,"
-            " s.file_type AS source_file_type"
+            " s.file_type AS source_file_type, s.origin AS source_origin,"
+            " s.origin_url AS source_origin_url"
             " FROM evidence e JOIN sources s ON s.id = e.source_id"
             f" WHERE e.handover_item_id IN ({placeholders})"
             " ORDER BY e.rowid ASC",

@@ -30,6 +30,7 @@ from trace_app.security.authz import (
 )
 from trace_app.services.auth_service import AuthError, AuthService
 from trace_app.services.demo_service import DEMO_ACCOUNTS, DEMO_PASSWORD, DemoService
+from trace_app.services.github_service import GitHubService
 from trace_app.services.document_service import DocumentService, extraction_summary
 from trace_app.services.extraction_service import segments_from_json
 from trace_app.services.project_service import ProjectService, ValidationError
@@ -114,6 +115,10 @@ def _reconstruction_service(project_id: str | None = None) -> ReconstructionServ
 
 def _review_service(project_id: str | None = None) -> ReviewService:
     return ReviewService(_database(), _principal(project_id))
+
+
+def _github_service(project_id: str | None = None) -> GitHubService:
+    return GitHubService(_database(), _principal(project_id))
 
 
 def _demo_service() -> DemoService | None:
@@ -773,8 +778,9 @@ def _render_source_row(project: dict, source: dict) -> None:
     documents = _document_service(project["id"])
     status = source.get("extraction_status")
 
+    from_github = str(source.get("origin") or "upload") == "github"
     facts = [
-        str(source["file_type"]).upper(),
+        "GITHUB" if from_github else str(source["file_type"]).upper(),
         human_size(int(source["file_size"])),
         f"{int(source['char_count']):,} characters",
     ]
@@ -838,6 +844,85 @@ def _render_source_row(project: dict, source: dict) -> None:
     st.markdown(ui.divider(), unsafe_allow_html=True)
 
 
+def _render_github_panel(project: dict) -> None:
+    """Connect a repository and ingest its recent history as sources."""
+    github = _github_service(project["id"])
+    links = github.linked_repositories(project["id"])
+
+    if links:
+        st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="tr-k">Linked repositories</div>', unsafe_allow_html=True)
+        for link in links:
+            st.markdown(
+                f'<div class="tr-card" style="margin-top:.5rem">'
+                f'<div class="tr-title">{ui.esc(link["owner"])}/'
+                f'{ui.esc(link["repo"])}</div>'
+                f'<div class="tr-note" style="margin-top:.3rem">'
+                f'{ui.esc(link.get("last_sync_note") or "")}</div>'
+                f'<div class="tr-note" style="margin-top:.3rem">Last synced '
+                f'{ui.esc(format_timestamp(link.get("last_synced_at")))} &middot; '
+                f'<a href="{ui.esc(link.get("html_url") or "")}" '
+                f'target="_blank" rel="noopener">Open on GitHub</a></div></div>',
+                unsafe_allow_html=True,
+            )
+
+    if not github.can_connect():
+        return
+
+    st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
+    with st.expander("Connect a GitHub repository", expanded=not links):
+        st.markdown(
+            ui.note(
+                "TRACE reads recent commits, pull requests and issues and "
+                "stores them as sources. Claims drawn from them are verified "
+                "against the ingested text exactly like claims from a "
+                "document. A public repository needs no token at all."
+            ),
+            unsafe_allow_html=True,
+        )
+        with st.form(f"gh_{project['id']}"):
+            repository = st.text_input(
+                "Repository", placeholder="owner/name or a github.com URL"
+            )
+            token = st.text_input(
+                "Fine-grained access token (only for a private repository)",
+                type="password",
+                help=(
+                    "Leave empty for a public repository. For a private one, "
+                    "read-only is enough: Contents, Issues and Pull requests. "
+                    "The token is used for this fetch and never stored."
+                ),
+            )
+            st.markdown(
+                ui.note(
+                    "Only the identifier, title, body, author login, date and "
+                    "link are kept \u2014 no diffs, no file contents, no email "
+                    "addresses. The token is never written to the database."
+                ),
+                unsafe_allow_html=True,
+            )
+            submitted = st.form_submit_button("Ingest repository", type="primary")
+
+        if submitted:
+            with st.spinner("Reading the repository\u2026"):
+                outcome = github.ingest(project["id"], repository, token)
+            st.session_state["gh_outcome"] = {
+                "ok": outcome.ok,
+                "message": outcome.message,
+                "notes": outcome.notes,
+            }
+            st.rerun()
+
+    outcome = st.session_state.pop("gh_outcome", None)
+    if outcome:
+        if outcome["ok"]:
+            st.success(outcome["message"])
+        else:
+            st.error(outcome["message"])
+        for note in outcome["notes"]:
+            st.markdown(ui.note(note), unsafe_allow_html=True)
+
+
 def _render_sources_section(project: dict) -> None:
     documents = _document_service(project["id"])
     if not documents.can_read_sources():
@@ -896,6 +981,7 @@ def _render_sources_section(project: dict) -> None:
 
     with uploader:
         _render_upload_form(project)
+        _render_github_panel(project)
 
 
 # --------------------------------------------------------------------------
@@ -926,6 +1012,7 @@ def _render_evidence_block(item: dict) -> None:
     with st.expander(label):
         for row in evidence:
             ok = bool(row["verified"])
+            link = row.get("source_url")
             st.markdown(
                 '<div class="tr-meta-row">'
                 + ui.pill(
@@ -935,6 +1022,12 @@ def _render_evidence_block(item: dict) -> None:
                 + ui.source_ref(
                     row.get("source_display_name") or "unknown source",
                     row.get("location_label") or "location not recorded",
+                )
+                + (
+                    f'<a class="tr-note" href="{ui.esc(link)}" target="_blank" '
+                    'rel="noopener" style="margin-left:.5rem">View on GitHub</a>'
+                    if link
+                    else ""
                 )
                 + "</div>"
                 + ui.quote(row.get("excerpt") or "", verified=ok),

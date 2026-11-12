@@ -31,13 +31,20 @@ _JOINER = "\n\n"
 
 @dataclass
 class Segment:
-    """A located block of text within a source document."""
+    """A located block of text within a source.
+
+    ``url`` is set for segments that came from somewhere with a stable public
+    address -- a commit, pull request or issue -- so evidence can link
+    straight back to the thing it quotes. It is None for uploaded documents,
+    which have no such address.
+    """
 
     index: int
     location_label: str
     text: str
     start_offset: int
     end_offset: int
+    url: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -81,6 +88,7 @@ def segments_from_json(raw: str | None) -> list[Segment]:
     segments: list[Segment] = []
     for entry in payload if isinstance(payload, list) else []:
         try:
+            url = entry.get("url")
             segments.append(
                 Segment(
                     index=int(entry["index"]),
@@ -88,6 +96,7 @@ def segments_from_json(raw: str | None) -> list[Segment]:
                     text=str(entry["text"]),
                     start_offset=int(entry["start_offset"]),
                     end_offset=int(entry["end_offset"]),
+                    url=str(url) if url else None,
                 )
             )
         except (KeyError, TypeError, ValueError):
@@ -95,12 +104,19 @@ def segments_from_json(raw: str | None) -> list[Segment]:
     return segments
 
 
-def _assemble(blocks: list[tuple[str, str]]) -> tuple[str, list[Segment]]:
-    """Turn ``(location_label, text)`` pairs into full text plus offsets."""
+def build_segments(
+    blocks: list[tuple[str, str, str | None]],
+) -> tuple[str, list[Segment]]:
+    """Turn ``(location_label, text, url)`` triples into text plus offsets.
+
+    Shared by file extraction and by ingestion from external systems, so a
+    commit and a PDF page produce the same kind of located segment and the
+    evidence layer does not need to know which it is looking at.
+    """
     segments: list[Segment] = []
     pieces: list[str] = []
     cursor = 0
-    for location_label, text in blocks:
+    for location_label, text, url in blocks:
         cleaned = text.strip()
         if len(cleaned) < _MIN_SEGMENT_CHARS:
             continue
@@ -113,11 +129,17 @@ def _assemble(blocks: list[tuple[str, str]]) -> tuple[str, list[Segment]]:
                 text=cleaned,
                 start_offset=start,
                 end_offset=end,
+                url=url,
             )
         )
         pieces.append(cleaned)
         cursor = end + len(_JOINER)
     return _JOINER.join(pieces), segments
+
+
+def _assemble(blocks: list[tuple[str, str]]) -> tuple[str, list[Segment]]:
+    """Legacy two-tuple form used by the file extractors."""
+    return build_segments([(label, text, None) for label, text in blocks])
 
 
 # --------------------------------------------------------------------------

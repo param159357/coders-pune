@@ -419,6 +419,7 @@ class ReconstructionService:
                         end_offset=evidence.end_offset,
                         support_note=evidence.reason,
                         verified=evidence.verified,
+                        source_url=evidence.source_url,
                     )
 
         return reconstruction_id
