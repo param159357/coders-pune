@@ -457,6 +457,76 @@ _CSS_SOURCE = """
 
   div[data-testid="stRadio"] label { font-size: .86rem; }
   hr { margin: 1.1rem 0; border-color: var(--tr-line); }
+
+  /* ---- Navigation rail -------------------------------------------------
+     Streamlit draws page navigation as a radio group, and a column of radio
+     circles reads as a form control rather than as navigation. These rules
+     hide the circle and style each option as a nav row: a tinted pill with a
+     left accent bar for the current page.
+
+     Scoped to .st-key-tr-nav, the class Streamlit emits for the keyed
+     container, so no other radio in the app is touched. The selectors follow
+     the structure Streamlit actually renders, which was read from the live
+     DOM rather than guessed:
+         label[data-testid="stRadioOption"][data-selected]
+           > span            (visually hidden <input>)
+           > div             (flex row)
+               > div         (the circle)
+               > div > p     (the label text)
+     data-selected is used for the active state in preference to
+     :has(input:checked) because it is the attribute Streamlit maintains. */
+  .st-key-tr-nav div[role="radiogroup"] {
+    gap: 1px !important; display: flex; flex-direction: column;
+  }
+  .st-key-tr-nav label[data-testid="stRadioOption"] {
+    padding: .44rem .6rem; border-radius: 8px; margin: 0 !important;
+    border-left: 2px solid transparent; transition: background .12s ease;
+  }
+  .st-key-tr-nav label[data-testid="stRadioOption"]:hover {
+    background: rgba(23,86,126,.055);
+  }
+  .st-key-tr-nav label[data-testid="stRadioOption"] > div > div:first-child {
+    display: none !important;
+  }
+  .st-key-tr-nav label[data-testid="stRadioOption"] p {
+    font-size: .875rem !important; font-weight: 500 !important;
+    color: var(--tr-muted) !important;
+  }
+  .st-key-tr-nav label[data-testid="stRadioOption"][data-selected="true"] {
+    background: rgba(23,86,126,.085); border-left-color: var(--tr-accent);
+  }
+  .st-key-tr-nav label[data-testid="stRadioOption"][data-selected="true"] p {
+    color: var(--tr-accent) !important; font-weight: 650 !important;
+  }
+
+  /* ---- Segmented filter ------------------------------------------------
+     The review filter is a short, mutually exclusive set, so it reads better
+     as a segmented control than as a row of circles. Same scoping and the
+     same DOM structure as the nav rail above. */
+  .st-key-tr-filter div[role="radiogroup"] {
+    gap: .3rem !important; flex-wrap: wrap;
+  }
+  .st-key-tr-filter label[data-testid="stRadioOption"] {
+    padding: .3rem .72rem; border-radius: 999px; margin: 0 !important;
+    border: 1px solid var(--tr-line); background: #fff;
+    transition: background .12s ease, border-color .12s ease;
+  }
+  .st-key-tr-filter label[data-testid="stRadioOption"]:hover {
+    border-color: var(--tr-accent);
+  }
+  .st-key-tr-filter label[data-testid="stRadioOption"] > div > div:first-child {
+    display: none !important;
+  }
+  .st-key-tr-filter label[data-testid="stRadioOption"] p {
+    font-size: .8rem !important; font-weight: 500 !important;
+    color: var(--tr-muted) !important;
+  }
+  .st-key-tr-filter label[data-testid="stRadioOption"][data-selected="true"] {
+    background: var(--tr-accent); border-color: var(--tr-accent);
+  }
+  .st-key-tr-filter label[data-testid="stRadioOption"][data-selected="true"] p {
+    color: #fff !important; font-weight: 600 !important;
+  }
 </style>
 """
 

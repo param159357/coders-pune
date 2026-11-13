@@ -262,6 +262,21 @@ def _visible_pages() -> list[str]:
     return pages
 
 
+#: Session-state key for the navigation widget itself. Kept distinct from
+#: "page" so programmatic navigation can assign "page" at any point in the
+#: run; see the comment in _render_sidebar.
+NAV_KEY = "nav_choice"
+
+
+def _nav_changed() -> None:
+    """Carry a click on the navigation rail into the page state.
+
+    Runs as Streamlit's on_change callback, which fires before the script
+    body, so the rest of the run already sees the page the user picked.
+    """
+    st.session_state["page"] = st.session_state[NAV_KEY]
+
+
 def _render_sidebar() -> str:
     user = _current_user()
     with st.sidebar:
@@ -272,12 +287,28 @@ def _render_sidebar() -> str:
         if current not in pages:
             current = PAGE_DASHBOARD
             st.session_state["page"] = current
-        page = st.radio(
-            "Navigation", pages, index=pages.index(current),
-            label_visibility="collapsed",
-        )
-        if page != current:
-            st.session_state["page"] = page
+        # The radio is driven by its own key rather than by index=.
+        #
+        # Passing a changing index= to a keyed-by-position widget made
+        # Streamlit reset the control to that index on the next run, which
+        # silently discarded every other click: navigating A -> B worked,
+        # B -> C was swallowed, C -> D worked again. Binding the widget to
+        # NAV_KEY and letting on_change write the page removes the index
+        # entirely, so the widget and the page can no longer disagree.
+        #
+        # NAV_KEY is deliberately not "page": _goto() and _open_project()
+        # assign "page" from inside the page body, which is after this
+        # widget has been instantiated, and Streamlit rejects writes to a
+        # widget's own key at that point. Keeping them separate lets
+        # programmatic navigation stay a plain assignment, and the sync
+        # below carries it into the widget on the following run.
+        if st.session_state.get(NAV_KEY) != current:
+            st.session_state[NAV_KEY] = current
+        with st.container(key="tr-nav"):
+            st.radio(
+                "Navigation", pages, key=NAV_KEY, on_change=_nav_changed,
+                label_visibility="collapsed",
+            )
 
         st.markdown(ui.divider(), unsafe_allow_html=True)
 
@@ -1375,11 +1406,18 @@ def _render_review(service: ProjectService) -> None:
     if reviews.sees_only_approved():
         choice = _FILTER_ALL
     else:
-        choice = st.radio(
-            "Show",
-            [_FILTER_ALL, _FILTER_UNREVIEWED, _FILTER_ATTENTION, _FILTER_APPROVED],
-            horizontal=True,
-        )
+        # Keyed so the stylesheet can render it as a segmented control.
+        with st.container(key="tr-filter"):
+            choice = st.radio(
+                "Show",
+                [
+                    _FILTER_ALL,
+                    _FILTER_UNREVIEWED,
+                    _FILTER_ATTENTION,
+                    _FILTER_APPROVED,
+                ],
+                horizontal=True,
+            )
 
     shown = 0
     for category, _label, items in reviews.grouped_items(latest["id"]):
