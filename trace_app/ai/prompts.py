@@ -82,7 +82,7 @@ Then, in `relationships`, record how items bear on each other:
 
 {_RELATION_GUIDE}
 
-A relationship needs its own evidence: a short exact quotation from a source that states the link. "Email testing is blocked by the absence of a test email service" supports a `blocks` relationship. Two items merely being about the same feature does not.
+A relationship needs its own evidence: a short exact quotation from a source that states the link. Two items merely being about the same feature is not a relationship.\n\nWorked example. Given these two items:\n\n- `i4` (blocker) "Email notification testing is blocked by the absence of a configured test email service."\n- `i7` (next_action) "Arrange a test email service."\n\nand a source sentence reading "Email notification testing is blocked by the absence of a configured test email service", the correct record is:\n\n    {{"from_ref": "i7", "to_ref": "i4", "relation": "addresses",\n     "evidence": {{"source_id": "<that source>", "location": "<its location>", "excerpt": "Email notification testing is blocked by the absence of a configured test email service"}}}}\n\nNote the direction: the action addresses the blocker, not the reverse. Work through your items and record every link the sources state \u2014 a blocker against what it holds up, a task against what it waits on, a decision against the work it caused.
 
 TRACE verifies a relationship's quotation exactly as it verifies an item's. A relationship whose quotation cannot be found is discarded, not drawn. Record only links a source states; if the sources never connect two items, leave them unconnected. An empty `relationships` list is a correct answer.
 
