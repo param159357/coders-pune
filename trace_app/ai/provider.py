@@ -22,7 +22,13 @@ from config import LLMConfig
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 120
-DEFAULT_MAX_OUTPUT_TOKENS = 8192
+
+#: Ceiling on the reply. The model allows far more, but a longer reply is
+#: slower and more exposed to the gateway timeouts this API produces under
+#: load. 8,192 was too tight: relationships are emitted last, after every
+#: item and its evidence, so a long findings list could push them past the
+#: limit and they would simply be absent with no indication why.
+DEFAULT_MAX_OUTPUT_TOKENS = 16384
 
 #: Gemini 3.x models reason before answering by default. For this task that is
 #: counterproductive and measurably so: reconstruction is structured
@@ -72,6 +78,15 @@ class LLMUnavailable(LLMError):
 
 class LLMBadResponse(LLMError):
     """The provider replied, but not with usable JSON."""
+
+
+class LLMTruncated(LLMBadResponse):
+    """The reply hit the output ceiling and was cut off mid-answer.
+
+    Distinct from unparseable output: the model was working correctly and
+    simply ran out of room, so whatever came last in the schema is missing.
+    Worth saying out loud rather than presenting a partial answer as whole.
+    """
 
 
 # --------------------------------------------------------------------------
@@ -254,9 +269,28 @@ class GeminiProvider(LLMProvider):
                 time.sleep(delay)
                 continue
 
+            self._check_not_truncated(response)
             return extract_json_object(getattr(response, "text", None))
 
         raise last_error or LLMUnavailable("The provider could not be reached.")
+
+    @staticmethod
+    def _check_not_truncated(response) -> None:
+        """Raise if the model stopped because it ran out of output room.
+
+        Without this the reply simply ends early and the missing findings look
+        like findings that were never there.
+        """
+        try:
+            reason = str(getattr(response.candidates[0], "finish_reason", "") or "")
+        except (AttributeError, IndexError):
+            return
+        if "MAX_TOKENS" in reason.upper():
+            raise LLMTruncated(
+                "The model ran out of room before finishing its answer, so "
+                "part of it is missing. Reduce the number of sources, or "
+                "raise the output limit."
+            )
 
     def generate_json(self, system_prompt: str, user_prompt: str) -> dict:
         """Try the configured model, then fall back if it stays unavailable.

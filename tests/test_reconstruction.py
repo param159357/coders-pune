@@ -757,3 +757,53 @@ def test_the_fingerprint_ignores_upload_order() -> None:
     b = [{"content_hash": "bbb"}, {"content_hash": "aaa"}]
     assert input_fingerprint(a, "m") == input_fingerprint(b, "m")
     assert input_fingerprint(a, "m") != input_fingerprint(a, "other-model")
+
+
+# --------------------------------------------------------------------------
+# A cut-off reply is reported, not passed off as complete
+# --------------------------------------------------------------------------
+
+class _Truncated:
+    """Mimics a Gemini response that hit the output ceiling."""
+
+    class _Candidate:
+        finish_reason = "MAX_TOKENS"
+
+    text = '{"items": [{"category": "risk", "text": "An item."}'  # cut off
+    candidates = [_Candidate()]
+
+
+class _Complete:
+    class _Candidate:
+        finish_reason = "STOP"
+
+    text = '{"items": []}'
+    candidates = [_Candidate()]
+
+
+def test_a_truncated_reply_is_detected(monkeypatch) -> None:
+    import trace_app.ai.provider as provider_module
+
+    monkeypatch.setattr(provider_module.time, "sleep", lambda _: None)
+    provider = provider_module.GeminiProvider(api_key="k", model="m", fallback_models=())
+    monkeypatch.setattr(provider, "_call", lambda *a, **k: _Truncated())
+
+    with pytest.raises(provider_module.LLMTruncated, match="ran out of room"):
+        provider.generate_json("sys", "user")
+
+
+def test_a_complete_reply_is_not_flagged(monkeypatch) -> None:
+    import trace_app.ai.provider as provider_module
+
+    provider = provider_module.GeminiProvider(api_key="k", model="m", fallback_models=())
+    monkeypatch.setattr(provider, "_call", lambda *a, **k: _Complete())
+    assert provider.generate_json("sys", "user") == {"items": []}
+
+
+def test_truncation_is_disclosed_in_the_run_notes(seeded) -> None:
+    """Missing findings must not look like findings that were never there."""
+    from trace_app.ai.provider import LLMTruncated
+
+    provider = FakeProvider({}, error=LLMTruncated("ran out of room"))
+    outcome = seeded["service"].run(seeded["project"], provider)
+    assert any("cut off before the model finished" in note for note in outcome.notes)

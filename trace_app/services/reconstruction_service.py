@@ -42,6 +42,7 @@ from trace_app.ai.provider import (
     LLMError,
     LLMNotConfigured,
     LLMProvider,
+    LLMTruncated,
     build_provider,
 )
 from trace_app.ai.schemas import ReconstructionDraft
@@ -296,14 +297,17 @@ class ReconstructionService:
         else:
             assert provider is not None
             try:
-                draft, batch_notes = self._run_model(
-                    provider, batches, catalogue, str(project["name"])
+                # Notes are appended to the caller's list as they happen, so
+                # the reason a batch failed survives even when every batch
+                # fails and the run falls back to the preview below.
+                draft = self._run_model(
+                    provider, batches, catalogue, str(project["name"]), notes
                 )
             except LLMError as exc:
-                # The provider is unreachable. Rather than leaving the user at a
-                # dead end, fall back to the deterministic matcher -- which is
-                # labelled as not-from-a-model everywhere it appears, and runs
-                # through exactly the same validation and evidence
+                # The provider is unreachable. Rather than leaving the user at
+                # a dead end, fall back to the deterministic matcher -- which
+                # is labelled as not-from-a-model everywhere it appears, and
+                # runs through exactly the same validation and evidence
                 # verification. The provider's own error is kept and shown, so
                 # nobody can mistake this for a successful model run.
                 logger.warning("Falling back to the preview: %s", exc)
@@ -317,13 +321,11 @@ class ReconstructionService:
                 )
                 model_provider, model_name = PREVIEW_PROVIDER_LABEL, "rule-based"
             else:
-                notes.extend(batch_notes)
                 # Record the model that actually answered, which may be a
-                # fallback, so a report never names a model that did not write
-                # it.
+                # fallback, so a report never names a model that did not
+                # write it.
                 model_provider = settings.provider
                 model_name = getattr(provider, "model_used", None) or settings.model
-                notes.extend(getattr(provider, "notes", []) or [])
 
         # --- verification: nothing below trusts what produced the draft ---
         report = VerificationReport()
@@ -403,10 +405,14 @@ class ReconstructionService:
         batches: list[list],
         catalogue: list[tuple[str, str]],
         project_name: str,
-    ) -> tuple[ReconstructionDraft, list[str]]:
-        """Call the provider once per batch and validate each reply."""
+        notes: list[str],
+    ) -> ReconstructionDraft:
+        """Call the provider once per batch and validate each reply.
+
+        ``notes`` is appended to as problems occur rather than returned, so a
+        run that ultimately fails still carries the explanation.
+        """
         drafts: list[ReconstructionDraft] = []
-        notes: list[str] = []
         failures = 0
         last_error: LLMError | None = None
 
@@ -421,6 +427,18 @@ class ReconstructionService:
             try:
                 payload = provider.generate_json(SYSTEM_PROMPT, user_prompt)
                 drafts.append(ReconstructionDraft.model_validate(payload))
+            except LLMTruncated as exc:
+                # The model was working; it ran out of room. Say so, because
+                # the missing findings would otherwise look like findings
+                # that were never there.
+                failures += 1
+                last_error = exc
+                logger.warning("Batch %s was truncated: %s", position, exc)
+                notes.append(
+                    f"Part {position} of {len(batches)} was cut off before the "
+                    "model finished, so some findings and the relationships "
+                    "between them are missing from it."
+                )
             except LLMBadResponse as exc:
                 failures += 1
                 last_error = exc
@@ -455,7 +473,8 @@ class ReconstructionService:
                 f"{failures} of {len(batches)} part(s) of the source material "
                 "could not be processed, so this draft is incomplete."
             )
-        return _merge_drafts(drafts), notes
+        notes.extend(getattr(provider, "notes", []) or [])
+        return _merge_drafts(drafts)
 
     # ------------------------------------------------------------- persist
     def _persist(
