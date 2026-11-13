@@ -217,6 +217,32 @@ class SourceRepository:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def find_extraction_by_hash(
+        self, content_hash: str, user_id: str
+    ) -> dict[str, Any] | None:
+        """A previous successful extraction of these exact bytes.
+
+        Scoped to projects the user is a member of, so reuse never crosses a
+        boundary the user could not already see across. Identical bytes give
+        identical text, so copying a stored extraction is the same answer the
+        parser would produce -- just without doing the work again.
+        """
+        if not content_hash:
+            return None
+        row = self._connection.execute(
+            "SELECT s.extracted_text, s.segments_json, s.char_count,"
+            " s.page_count, s.extraction_status, s.extraction_notes,"
+            " s.display_name"
+            " FROM sources s"
+            " JOIN project_members m ON m.project_id = s.project_id"
+            " WHERE s.content_hash = ? AND m.user_id = ?"
+            "   AND s.extraction_status IN ('extracted', 'partially_extracted')"
+            "   AND s.extracted_text IS NOT NULL"
+            " LIMIT 1",
+            (content_hash, user_id),
+        ).fetchone()
+        return _row_to_dict(row)
+
     def find_by_hash(
         self, project_id: str, content_hash: str
     ) -> dict[str, Any] | None:
@@ -251,6 +277,20 @@ class ReconstructionRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
+    def find_by_fingerprint(
+        self, project_id: str, fingerprint: str
+    ) -> dict[str, Any] | None:
+        """The most recent successful run computed from identical input."""
+        if not fingerprint:
+            return None
+        row = self._connection.execute(
+            "SELECT * FROM reconstructions WHERE project_id = ?"
+            " AND input_fingerprint = ? AND status = 'draft_ready'"
+            " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (project_id, fingerprint),
+        ).fetchone()
+        return _row_to_dict(row)
+
     def create(
         self,
         project_id: str,
@@ -261,14 +301,16 @@ class ReconstructionRepository:
         validated_json: str | None = None,
         processing_notes: str | None = None,
         is_demo_preview: bool = False,
+        input_fingerprint: str | None = None,
     ) -> str:
         reconstruction_id = new_id("rec")
         with transaction(self._connection):
             self._connection.execute(
                 "INSERT INTO reconstructions (id, project_id, created_at,"
                 " model_provider, model_name, status, validated_json,"
-                " processing_notes, source_count, is_demo_preview)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " processing_notes, source_count, is_demo_preview,"
+                " input_fingerprint)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     reconstruction_id,
                     project_id,
@@ -280,6 +322,7 @@ class ReconstructionRepository:
                     processing_notes,
                     source_count,
                     1 if is_demo_preview else 0,
+                    input_fingerprint,
                 ),
             )
         return reconstruction_id

@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 
 #: Bump this and add a matching block in ``_MIGRATIONS`` for every change.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -228,10 +228,21 @@ CREATE INDEX IF NOT EXISTS idx_relationships_reconstruction
     ON item_relationships (reconstruction_id);
 """
 
+# Version 7 records what a reconstruction was computed from, so the same work
+# is not paid for twice. The fingerprint covers the exact set of source
+# contents, the model, and the prompt -- change any of them and the previous
+# answer no longer applies.
+_MIGRATION_7 = """
+ALTER TABLE reconstructions ADD COLUMN input_fingerprint TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_reconstructions_fingerprint
+    ON reconstructions (project_id, input_fingerprint);
+"""
+
 #: Ordered migrations. Index 0 takes the database from version 0 to 1.
 _MIGRATIONS = [
     _MIGRATION_1, _MIGRATION_2, _MIGRATION_3, _MIGRATION_4, _MIGRATION_5,
-    _MIGRATION_6,
+    _MIGRATION_6, _MIGRATION_7,
 ]
 
 

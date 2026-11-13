@@ -91,10 +91,16 @@ UPLOAD_DIR = Path(get_setting("TRACE_UPLOAD_DIR") or (PROJECT_ROOT / "data" / "u
 #: Per-file upload ceiling. Documented in the README and enforced in
 #: ``trace_app.utils.file_validation``; ``.streamlit/config.toml`` carries a
 #: matching ``maxUploadSize`` so Streamlit rejects oversized files early too.
-MAX_UPLOAD_MB = _get_int_setting("TRACE_MAX_UPLOAD_MB", 10)
+MAX_UPLOAD_MB = _get_int_setting("TRACE_MAX_UPLOAD_MB", 25)
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 ALLOWED_EXTENSIONS = ("pdf", "docx", "txt")
+
+#: How much source text may go into a single model request. Overridable so a
+#: deployment with a larger or smaller model can be tuned without a code
+#: change. See trace_app.utils.text_chunking for why the default is not set
+#: near the model's ceiling.
+REQUEST_CHARS = _get_int_setting("TRACE_REQUEST_CHARS", 400000)
 
 
 def ensure_directories() -> None:

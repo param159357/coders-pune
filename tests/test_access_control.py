@@ -320,7 +320,10 @@ def test_passwords_are_salted_and_never_stored_in_clear(connection) -> None:
 def test_a_tampered_hash_fails_closed() -> None:
     stored = hash_password("correct-password")
     assert verify_password("correct-password", stored)
-    assert not verify_password("correct-password", stored[:-1] + "0")
+    # Flip the last hex digit to something it definitely is not, rather than
+    # to a fixed character that is sometimes already there.
+    flipped = "f" if stored[-1] != "f" else "0"
+    assert not verify_password("correct-password", stored[:-1] + flipped)
     assert not verify_password("correct-password", "not-a-hash")
     assert not verify_password("correct-password", None)
 

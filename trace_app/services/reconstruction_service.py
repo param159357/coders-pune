@@ -18,6 +18,7 @@ appears.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -83,6 +84,31 @@ class ReconstructionOutcome:
     item_count: int = 0
     is_preview: bool = False
     notes: list[str] = field(default_factory=list)
+    #: True when an existing draft was kept because the inputs had not
+    #: changed, so no model call was made and nothing was spent.
+    reused: bool = False
+
+
+def input_fingerprint(sources: list[dict[str, Any]], model: str) -> str:
+    """Identify exactly what a reconstruction was computed from.
+
+    Covers the content of every source, the model, and the prompt itself.
+    Change a document, add one, switch models, or edit the instructions, and
+    the fingerprint changes and the previous answer no longer applies. Sorted,
+    so upload order does not matter.
+    """
+    parts = sorted(
+        str(s.get("content_hash") or s.get("id")) for s in sources
+    )
+    digest = hashlib.sha256()
+    digest.update("|".join(parts).encode("utf-8"))
+    digest.update(b"::")
+    digest.update(str(model).encode("utf-8"))
+    digest.update(b"::")
+    # The prompt is part of the input: change the instructions and the same
+    # sources can legitimately give a different answer.
+    digest.update(SYSTEM_PROMPT.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _merge_drafts(drafts: list[ReconstructionDraft]) -> ReconstructionDraft:
@@ -184,9 +210,20 @@ class ReconstructionService:
         return self._principal.can(Capability.RUN_RECONSTRUCTION)
 
     def run(
-        self, project: dict[str, Any], provider: LLMProvider | None = None
+        self,
+        project: dict[str, Any],
+        provider: LLMProvider | None = None,
+        force: bool = False,
     ) -> ReconstructionOutcome:
-        """Run the pipeline for one project and persist a draft."""
+        """Run the pipeline for one project and persist a draft.
+
+        When nothing has changed since the last successful run -- same
+        documents, same model, same prompt -- the existing draft is kept and
+        no model call is made. A reconstruction is the expensive step, and
+        re-running it on unchanged input would spend money and time to
+        produce the same answer while discarding the review work already done
+        against it. ``force=True`` runs anyway.
+        """
         project_id = str(project["id"])
         require(self._principal, Capability.RUN_RECONSTRUCTION, project_id)
         sources = self._sources.list_usable_for_project(project_id)
@@ -200,9 +237,41 @@ class ReconstructionService:
                 ),
             )
 
+        settings_preview = config.get_llm_config()
+        fingerprint = input_fingerprint(sources, settings_preview.model)
+
+        if not force:
+            previous = self._reconstructions.find_by_fingerprint(
+                project_id, fingerprint
+            )
+            if previous is not None:
+                counts = self._items.count_by_review_status(previous["id"])
+                reviewed = counts.get("approved", 0) + counts.get("rejected", 0)
+                return ReconstructionOutcome(
+                    ok=True,
+                    reused=True,
+                    reconstruction_id=str(previous["id"]),
+                    item_count=sum(counts.values()),
+                    is_preview=bool(previous["is_demo_preview"]),
+                    message=(
+                        "Nothing has changed since the last run \u2014 same "
+                        "documents, same model \u2014 so the existing draft was "
+                        "kept and no AI call was made."
+                        + (
+                            f" {reviewed} review decision(s) were preserved."
+                            if reviewed
+                            else ""
+                        )
+                    ),
+                    notes=[
+                        "Add, remove or change a source to get a new draft, "
+                        "or choose to run again anyway."
+                    ],
+                )
+
         index = SourceIndex(sources)
         chunks = chunk_sources(sources)
-        batches = batch_chunks(chunks)
+        batches = batch_chunks(chunks, request_chars=config.REQUEST_CHARS)
         catalogue = [(str(s["id"]), str(s["display_name"])) for s in sources]
 
         settings = config.get_llm_config()
@@ -284,6 +353,7 @@ class ReconstructionService:
             model_name=model_name,
             notes=notes,
             is_preview=use_preview,
+            fingerprint=fingerprint,
             draft_items=draft.items[:item_count],
             relationships=verified_relationships,
             verification={
@@ -398,6 +468,7 @@ class ReconstructionService:
         model_name: str | None,
         notes: list[str],
         is_preview: bool,
+        fingerprint: str | None = None,
         verification: dict[str, int] | None = None,
         draft_items: list[Any] | None = None,
         relationships: list[VerifiedRelationship] | None = None,
@@ -426,6 +497,7 @@ class ReconstructionService:
             validated_json=json.dumps(payload),
             processing_notes="\n".join(notes) if notes else None,
             is_demo_preview=is_preview,
+            input_fingerprint=fingerprint,
         )
 
         # Maps the model's own refs onto TRACE's identifiers, so relationships

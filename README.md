@@ -256,6 +256,32 @@ evidence verification, and it is labelled as not-from-a-model in the database,
 in the UI, in the run notes and in the exported report — with the provider's
 own error quoted — so it can never be mistaken for a successful model run.
 
+### Scale, and not paying twice
+
+A single reconstruction request now carries up to **400,000 characters**
+(`TRACE_REQUEST_CHARS`) — roughly 150 pages in one pass. The previous 60,000
+was a cautious MVP figure using 1.5% of the model's million-token context. It
+is deliberately still well below the ceiling: a larger request is markedly
+more likely to meet a 503 or a gateway timeout on shared capacity. Measured on
+a 183,000-character corpus, that is one request instead of four, in 12 seconds,
+with every citation verified.
+
+Beyond roughly 150 pages the right answer is retrieval rather than a bigger
+envelope — and retrieval changes the honesty story, because "we checked
+everything" stops being true once the model only sees a subset.
+
+Two things are not computed twice:
+
+- **Extraction.** Identical bytes give identical text, so a file already
+  parsed in one of your projects is not parsed again in another. Reuse is
+  scoped to projects you already belong to.
+- **Reconstruction.** A run records a fingerprint of its inputs — every
+  source's content, the model, and the prompt. Run again with nothing changed
+  and TRACE keeps the existing draft, makes no AI call, and preserves the
+  review decisions already made against it. Change any source, switch model or
+  edit the prompt and the fingerprint changes. "Re-run even if unchanged"
+  overrides it.
+
 ### Reliability of the model call
 
 Three things were added after watching the real API misbehave during
@@ -401,7 +427,7 @@ Stated plainly, because an honest limitation is worth more than an overclaim.
   not promise long-term persistence.
 - **No OCR.** An image-only or scanned PDF yields no text, and TRACE reports it
   as `No text found` rather than claiming a successful extraction.
-- **Upload ceiling of 10 MB per file**, configurable via `TRACE_MAX_UPLOAD_MB`.
+- **Upload ceiling of 25 MB per file**, configurable via `TRACE_MAX_UPLOAD_MB`.
   Only `.pdf`, `.docx`, and `.txt` are accepted; the declared extension is not
   trusted on its own, as the leading bytes are checked too.
 - **Deduplication is byte-exact.** Two files with identical content are caught,

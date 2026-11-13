@@ -227,3 +227,64 @@ def test_a_version_1_database_upgrades_to_version_2(tmp_path) -> None:
     assert "segments_json" in columns
     assert "extraction_notes" in columns
     connection.close()
+
+
+# --------------------------------------------------------------------------
+# Not parsing the same bytes twice
+# --------------------------------------------------------------------------
+
+def test_an_identical_file_in_another_project_reuses_its_extraction(
+    connection, isolated_storage, project_service, make_pdf
+) -> None:
+    """Parsing is the slow step; identical bytes give identical text."""
+    del isolated_storage
+    from trace_app.services.auth_service import AuthService
+
+    auth = AuthService(connection)
+    user = auth.register("reuse@test.local", "reuse-password")
+    alpha = project_service.create_project("Alpha")
+    beta = project_service.create_project("Beta")
+    auth.register_owner(alpha["id"], user["id"])
+    auth.register_owner(beta["id"], user["id"])
+
+    data = make_pdf("spec.pdf", ["A specification that appears in two projects."]).read_bytes()
+
+    first = DocumentService(connection, auth.principal_for(user, alpha["id"]))
+    second = DocumentService(connection, auth.principal_for(user, beta["id"]))
+
+    a = first.upload(alpha["id"], "spec.pdf", data)
+    assert a.accepted and not a.reused_extraction
+
+    b = second.upload(beta["id"], "spec.pdf", data)
+    assert b.accepted and b.reused_extraction
+    assert "not parsed again" in b.message
+    # Same text, from the cache rather than the parser.
+    assert b.source["extracted_text"] == a.source["extracted_text"]
+    assert b.source["char_count"] == a.source["char_count"]
+
+
+def test_extraction_is_not_reused_across_users(
+    connection, isolated_storage, project_service, make_pdf
+) -> None:
+    """Reuse is scoped to projects the uploader already belongs to."""
+    del isolated_storage
+    from trace_app.services.auth_service import AuthService
+
+    auth = AuthService(connection)
+    owner = auth.register("owner-a@test.local", "a-password")
+    stranger = auth.register("stranger@test.local", "b-password")
+    alpha = project_service.create_project("Alpha")
+    beta = project_service.create_project("Beta")
+    auth.register_owner(alpha["id"], owner["id"])
+    auth.register_owner(beta["id"], stranger["id"])
+
+    data = make_pdf("spec.pdf", ["Shared bytes, separate people."]).read_bytes()
+    DocumentService(connection, auth.principal_for(owner, alpha["id"])).upload(
+        alpha["id"], "spec.pdf", data
+    )
+    outcome = DocumentService(
+        connection, auth.principal_for(stranger, beta["id"])
+    ).upload(beta["id"], "spec.pdf", data)
+
+    assert outcome.accepted
+    assert not outcome.reused_extraction  # parsed fresh for them

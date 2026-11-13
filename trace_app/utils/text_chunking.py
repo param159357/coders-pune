@@ -13,15 +13,28 @@ from typing import Any
 
 from trace_app.services.extraction_service import Segment, segments_from_json
 
-#: Target size of one chunk, in characters.
-DEFAULT_CHUNK_CHARS = 6000
+#: Target size of one chunk, in characters. Chunks are the unit of location
+#: tracking, not a model limit, so this stays modest: a smaller chunk means a
+#: tighter range of pages behind each piece of evidence.
+DEFAULT_CHUNK_CHARS = 8000
 
 #: Segments repeated at the start of the next chunk, so a statement split
 #: across a boundary is still visible in full to at least one request.
 DEFAULT_OVERLAP_SEGMENTS = 1
 
 #: Ceiling on the source text sent in a single model request.
-DEFAULT_REQUEST_CHARS = 60000
+#:
+#: Gemini 3.x accepts about a million input tokens, roughly four million
+#: characters. The old value of 60,000 used 1.5% of that -- a cautious MVP
+#: number, not a technical limit, and it capped a project at about thirty
+#: pages. 400,000 characters is around 100,000 tokens: roughly 150 pages in
+#: one pass, with ample headroom for the system prompt and the reply.
+#:
+#: It is deliberately not set near the ceiling. A larger request takes longer,
+#: and a long request is far more likely to meet a 503 or a gateway timeout on
+#: shared capacity -- which was measured repeatedly against this API. Past
+#: this size the right answer is retrieval, not a bigger envelope.
+DEFAULT_REQUEST_CHARS = 400000
 
 
 @dataclass

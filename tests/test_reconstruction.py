@@ -677,3 +677,83 @@ def test_the_reconstruction_records_the_model_that_actually_answered(
     latest = seeded["service"].latest(seeded["project"]["id"])
     assert latest["model_name"] == "backup-model"
     assert any("backup-model" in note for note in outcome.notes)
+
+
+# --------------------------------------------------------------------------
+# Not paying twice for the same work
+# --------------------------------------------------------------------------
+
+def test_an_unchanged_project_reuses_the_existing_draft(seeded) -> None:
+    """A reconstruction is the expensive step; identical input should not
+    pay for it twice, nor discard review work already done against it."""
+    provider = FakeProvider(
+        {
+            "items": [
+                {
+                    "category": "decision",
+                    "text": "Payment integration was postponed.",
+                    "evidence_status": "supported",
+                    "evidence": [
+                        {
+                            "source_id": seeded["source"]["id"],
+                            "location": "paragraph 2",
+                            "excerpt": "Payment integration was postponed until after the first release.",
+                        }
+                    ],
+                }
+            ],
+            "conflicts": [],
+            "missing_information": [],
+        }
+    )
+    first = seeded["service"].run(seeded["project"], provider)
+    assert first.ok and not first.reused
+    calls_after_first = len(provider.calls)
+
+    second = seeded["service"].run(seeded["project"], provider)
+    assert second.reused
+    assert second.reconstruction_id == first.reconstruction_id
+    assert len(provider.calls) == calls_after_first  # no new model call
+    assert "no AI call was made" in second.message
+
+
+def test_forcing_a_run_ignores_the_cache(seeded) -> None:
+    provider = FakeProvider({"items": [], "conflicts": [], "missing_information": []})
+    first = seeded["service"].run(seeded["project"], provider)
+    forced = seeded["service"].run(seeded["project"], provider, force=True)
+    assert not forced.reused
+    assert forced.reconstruction_id != first.reconstruction_id
+    assert len(provider.calls) == 2
+
+
+def test_adding_a_source_invalidates_the_cache(seeded) -> None:
+    provider = FakeProvider({"items": [], "conflicts": [], "missing_information": []})
+    seeded["service"].run(seeded["project"], provider)
+
+    DocumentService(seeded["connection"], OWNER).upload(
+        seeded["project"]["id"], "extra.txt", b"An entirely new source document."
+    )
+    again = seeded["service"].run(seeded["project"], provider)
+    assert not again.reused
+    assert len(provider.calls) == 2
+
+
+def test_changing_the_prompt_invalidates_the_cache(seeded, monkeypatch) -> None:
+    """The instructions are part of the input, so editing them must re-run."""
+    import trace_app.services.reconstruction_service as module
+
+    provider = FakeProvider({"items": [], "conflicts": [], "missing_information": []})
+    seeded["service"].run(seeded["project"], provider)
+
+    monkeypatch.setattr(module, "SYSTEM_PROMPT", "A different instruction entirely.")
+    again = seeded["service"].run(seeded["project"], provider)
+    assert not again.reused
+
+
+def test_the_fingerprint_ignores_upload_order() -> None:
+    from trace_app.services.reconstruction_service import input_fingerprint
+
+    a = [{"content_hash": "aaa"}, {"content_hash": "bbb"}]
+    b = [{"content_hash": "bbb"}, {"content_hash": "aaa"}]
+    assert input_fingerprint(a, "m") == input_fingerprint(b, "m")
+    assert input_fingerprint(a, "m") != input_fingerprint(a, "other-model")

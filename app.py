@@ -407,7 +407,7 @@ def _render_project_card(project: dict, service: ProjectService) -> None:
 
 def _render_dashboard(service: ProjectService) -> None:
     st.markdown(
-        ui.page_head("Project handovers", config.APP_DESCRIPTION, eyebrow="TRACE"),
+        ui.hero("Project handovers", config.APP_DESCRIPTION, eyebrow="TRACE"),
         unsafe_allow_html=True,
     )
 
@@ -597,18 +597,29 @@ def _render_reconstruction_section(project: dict) -> None:
     with action:
         label = "Run reconstruction" if not latest else "Run again"
         disabled = not usable
-        if reconstructions.can_run() and st.button(
-            label, type="primary", disabled=disabled, width="stretch"
-        ):
-            with st.spinner("Reading sources and checking evidence…"):
-                outcome = reconstructions.run(project)
-            st.session_state["reconstruction_outcome"] = {
-                "ok": outcome.ok,
-                "message": outcome.message,
-                "notes": outcome.notes,
-                "is_preview": outcome.is_preview,
-            }
-            st.rerun()
+        if reconstructions.can_run():
+            # An unchanged project keeps its existing draft rather than paying
+            # for the same answer twice and discarding the review done against
+            # it. This is the way to override that.
+            force = bool(latest) and st.checkbox(
+                "Re-run even if unchanged",
+                key=f"force_{project['id']}",
+                help=(
+                    "By default, running again on the same documents keeps the "
+                    "existing draft and makes no AI call."
+                ),
+            )
+            if st.button(label, type="primary", disabled=disabled, width="stretch"):
+                with st.spinner("Reading sources and checking evidence…"):
+                    outcome = reconstructions.run(project, force=bool(force))
+                st.session_state["reconstruction_outcome"] = {
+                    "ok": outcome.ok,
+                    "message": outcome.message,
+                    "notes": outcome.notes,
+                    "is_preview": outcome.is_preview,
+                    "reused": outcome.reused,
+                }
+                st.rerun()
 
     if not reconstructions.can_run():
         st.markdown(
@@ -635,6 +646,8 @@ def _render_reconstruction_section(project: dict) -> None:
     if outcome:
         if not outcome["ok"]:
             st.error(outcome["message"])
+        elif outcome.get("reused"):
+            st.info(outcome["message"])
         else:
             st.success(outcome["message"])
             if outcome["is_preview"]:
@@ -756,6 +769,7 @@ def _render_upload_form(project: dict) -> None:
             "accepted": outcome.accepted,
             "status": outcome.extraction_status,
             "message": outcome.message,
+            "reused": outcome.reused_extraction,
         }
         for outcome in outcomes
     ]
@@ -1063,6 +1077,7 @@ def _render_review_item(item: dict, reconstruction_id: str) -> None:
         )
         st.markdown(
             '<div class="tr-meta-row">'
+            + ui.category_badge(item["category"])
             + ui.evidence_pill(item["evidence_status"])
             + ui.review_pill(item["review_status"])
             + attention
@@ -1367,15 +1382,13 @@ def _render_review(service: ProjectService) -> None:
         )
 
     shown = 0
-    for _, label, items in reviews.grouped_items(latest["id"]):
+    for category, _label, items in reviews.grouped_items(latest["id"]):
         visible = [item for item in items if _passes_filter(item, choice)]
         if not visible:
             continue
         shown += len(visible)
         st.markdown(
-            f'<h2 style="margin-top:1.5rem">{ui.esc(label)} '
-            f'<span class="tr-chip">{len(visible)}</span></h2>',
-            unsafe_allow_html=True,
+            ui.category_heading(category, len(visible)), unsafe_allow_html=True
         )
         for item in visible:
             _render_review_item(item, latest["id"])
@@ -1406,9 +1419,9 @@ def _render_focused_item(reviews, latest: dict, focus_id: str, edges: list) -> N
     st.markdown(
         '<div class="tr-card tr-card-pad">'
         '<div class="tr-meta-row">'
+        + ui.category_badge(item["category"])
         + ui.evidence_pill(item["evidence_status"])
         + ui.review_pill(item["review_status"])
-        + ui.chip(category_label_for(item["category"]))
         + "</div>"
         f'<div class="tr-item-text">{ui.esc(item["text"])}</div></div>',
         unsafe_allow_html=True,
@@ -1757,7 +1770,16 @@ def _sign_in_user(user: dict) -> None:
 def _render_auth_screen() -> None:
     """Sign in or create an account. Nothing else is reachable until then."""
     st.markdown(
-        ui.page_head("Sign in to TRACE", config.APP_DESCRIPTION, eyebrow="TRACE"),
+        ui.hero(
+            "Evidence-backed project handovers",
+            config.APP_DESCRIPTION,
+            eyebrow="TRACE",
+            points=[
+                "Every claim quoted from your documents",
+                "Checked against the source, not trusted",
+                "Nothing exported until a human approves it",
+            ],
+        ),
         unsafe_allow_html=True,
     )
     st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)

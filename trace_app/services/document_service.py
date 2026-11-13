@@ -18,7 +18,11 @@ import config
 from database.repositories import ProjectRepository, SourceRepository
 from trace_app.models import ExtractionStatus, new_id
 from trace_app.security.authz import Capability, Principal, require
-from trace_app.services.extraction_service import extract_text
+from trace_app.services.extraction_service import (
+    ExtractionResult,
+    extract_text,
+    segments_from_json,
+)
 from trace_app.utils.file_validation import (
     FileValidationError,
     build_stored_path,
@@ -37,6 +41,9 @@ class UploadOutcome:
     source: dict[str, Any] | None = None
     message: str = ""
     duplicate_of: str | None = None
+    #: True when a previous extraction of these exact bytes was reused
+    #: instead of parsing the document again.
+    reused_extraction: bool = False
 
     @property
     def extraction_status(self) -> str | None:
@@ -140,8 +147,31 @@ class DocumentService:
                 ),
             )
 
-        # 4. Extract. A failure here is recorded, not hidden.
-        result = extract_text(stored_path, validated.extension)
+        # 4. Extract -- unless these exact bytes have been parsed before.
+        #
+        # Identical bytes produce identical text, so a stored extraction is
+        # the same answer the parser would give. Reuse is scoped to projects
+        # this user already belongs to, so it never crosses a boundary they
+        # could not see across anyway. This matters most for large PDFs, where
+        # parsing is the slow step and the same specification often lands in
+        # several projects.
+        cached = self._sources.find_extraction_by_hash(
+            validated.content_hash, self._principal.user_id
+        )
+        reused = False
+        if cached is not None:
+            result = ExtractionResult(
+                status=str(cached["extraction_status"]),
+                full_text=str(cached["extracted_text"] or ""),
+                segments=segments_from_json(cached.get("segments_json")),
+                page_count=cached.get("page_count"),
+            )
+            reused = True
+            logger.info(
+                "Reusing a stored extraction for %s", validated.display_name
+            )
+        else:
+            result = extract_text(stored_path, validated.extension)
 
         try:
             source = self._sources.create(
@@ -153,7 +183,10 @@ class DocumentService:
                 extraction_status=result.status,
                 extracted_text=result.full_text or None,
                 extraction_error=result.error,
-                extraction_notes=result.notes_text(),
+                extraction_notes=(
+                    "Text reused from an earlier extraction of an identical "
+                    "file." if reused else result.notes_text()
+                ),
                 segments_json=result.segments_json() if result.segments else None,
                 char_count=result.char_count,
                 page_count=result.page_count,
@@ -174,7 +207,13 @@ class DocumentService:
 
         self._projects.touch(project_id)
 
-        if result.succeeded:
+        if result.succeeded and reused:
+            message = (
+                f"“{validated.display_name}” was added. Its text had "
+                "already been extracted from an identical file, so it was not "
+                "parsed again."
+            )
+        elif result.succeeded:
             message = f"“{validated.display_name}” was added and text extracted."
         else:
             message = result.error or "No text could be extracted from this file."
@@ -183,6 +222,7 @@ class DocumentService:
             accepted=True,
             source=source,
             message=message,
+            reused_extraction=reused,
         )
 
     def upload_many(

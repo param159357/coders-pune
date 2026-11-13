@@ -31,6 +31,88 @@ from trace_app.models import (
 ACCENT = "#17567E"
 ACCENT_SOFT = "#EAF1F7"
 
+#: Each category gets its own colour and mark. Ten grey boxes in a column are
+#: hard to scan; a consistent colour and a small icon let a reader find the
+#: blockers without reading every heading. The marks are drawn as inline SVG
+#: paths so they need no font and no network request.
+CATEGORY_COLOURS: dict[str, str] = {
+    "project_overview": "#17567E",
+    "decision": "#1E9E68",
+    "completed_work": "#2F8F5B",
+    "pending_work": "#D08A16",
+    "blocker": "#C2410C",
+    "dependency": "#7A5CC4",
+    "risk": "#D04545",
+    "open_question": "#2C83BC",
+    "responsibility": "#5C7089",
+    "next_action": "#0E7C86",
+}
+
+#: 16x16 stroke paths, drawn with currentColor so they inherit the category.
+_CATEGORY_PATHS: dict[str, str] = {
+    "project_overview": "M3 3h10v10H3z M5.5 6h5 M5.5 8.5h5 M5.5 11h3",
+    "decision": "M8 2v5 M8 7l-4 3 M8 7l4 3 M4 10v3 M12 10v3",
+    "completed_work": "M3 8.5l3.2 3L13 5",
+    "pending_work": "M8 3.2a4.8 4.8 0 1 0 0 9.6 4.8 4.8 0 0 0 0-9.6z M8 5.5V8l2 1.3",
+    "blocker": "M8 2.6 2.6 8 8 13.4 13.4 8z M6 6l4 4 M10 6l-4 4",
+    "dependency": "M6.4 9.6 9.6 6.4 M6 11.2 4.6 12.6a2.3 2.3 0 0 1-3.2-3.2L2.8 8"
+                  " M13.2 8l1.4-1.4a2.3 2.3 0 0 0-3.2-3.2L10 4.8",
+    "risk": "M8 2.8 1.8 13.2h12.4z M8 6.6v3 M8 11.2v.2",
+    "open_question": "M8 2.6a5.4 5.4 0 1 0 0 10.8 5.4 5.4 0 0 0 0-10.8z"
+                     " M6.4 6.3a1.7 1.7 0 1 1 1.9 1.9v1 M8.2 11v.2",
+    "responsibility": "M8 8.4a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2z"
+                      " M3.2 13.4a4.8 4.8 0 0 1 9.6 0",
+    "next_action": "M2.8 8h9 M8.6 4.8 11.8 8l-3.2 3.2",
+}
+
+
+def category_colour(category: str | None) -> str:
+    return CATEGORY_COLOURS.get(str(category or ""), "#6B7A8C")
+
+
+def category_icon(category: str | None, size: int = 14) -> str:
+    """An inline mark for a category, coloured to match it."""
+    path = _CATEGORY_PATHS.get(str(category or ""))
+    if not path:
+        return ""
+    colour = category_colour(category)
+    return (
+        f'<svg width="{size}" height="{size}" viewBox="0 0 16 16" fill="none" '
+        f'stroke="{colour}" stroke-width="1.5" stroke-linecap="round" '
+        f'stroke-linejoin="round" aria-hidden="true" '
+        f'style="vertical-align:-2px;flex:0 0 auto"><path d="{path}"/></svg>'
+    )
+
+
+def category_badge(category: str | None) -> str:
+    """Icon plus label, in the category's own colour."""
+    from trace_app.models import category_label
+
+    colour = category_colour(category)
+    return (
+        f'<span class="tr-cat" style="color:{colour}">'
+        f"{category_icon(category)}"
+        f"<span>{esc(category_label(category))}</span></span>"
+    )
+
+
+def category_heading(category: str | None, count: int | None = None) -> str:
+    """A section heading carrying the category's mark and, optionally, a count."""
+    from trace_app.models import category_label
+
+    colour = category_colour(category)
+    tally = f' <span class="tr-chip">{count}</span>' if count is not None else ""
+    # Streamlit rewrites the heading and wraps its text, which can swallow the
+    # flex gap, so the mark carries its own spacing inline.
+    mark = category_icon(category, 17).replace(
+        'style="vertical-align:-2px;flex:0 0 auto"',
+        'style="vertical-align:-3px;flex:0 0 auto;margin-right:.5rem"',
+    )
+    return (
+        f'<h2 class="tr-cat-head" style="--cat:{colour}">'
+        f"{mark}<span>{esc(category_label(category))}</span>{tally}</h2>"
+    )
+
 #: tone -> (text, background, border, dot)
 _TONES: dict[str, tuple[str, str, str, str]] = {
     "neutral": ("#475569", "#F1F4F8", "#DDE3EB", "#94A3B8"),
@@ -237,6 +319,53 @@ _CSS_SOURCE = """
   }
   .tr-src strong { color: var(--tr-ink-2); font-weight: 600; }
 
+  /* ---------- category identity ---------- */
+  .tr-cat {
+    display: inline-flex; align-items: center; gap: .32rem;
+    font-size: .745rem; font-weight: 650; letter-spacing: .01em;
+  }
+  h2.tr-cat-head {
+    display: flex !important; align-items: center !important;
+    gap: .5rem !important;
+    margin: 1.7rem 0 .75rem !important; padding: .1rem 0 .1rem .65rem;
+    border-left: 3px solid var(--cat, var(--tr-accent));
+  }
+  h2.tr-cat-head svg { flex: 0 0 auto; }
+  /* ---------- hero ---------- */
+  .tr-hero {
+    background: linear-gradient(135deg, #17567E 0%, #1F6F96 55%, #2C83BC 100%);
+    border-radius: 14px; padding: 1.8rem 2rem; color: #fff;
+    margin-bottom: 1.4rem;
+  }
+  /* Streamlit rewrites an injected heading: it strips inline styles, adds an
+     id, and wraps the text in its own span. Colouring only the h1 therefore
+     leaves the visible text dark on the blue. Colour the descendants too. */
+  .tr-hero h1, .tr-hero h1 * {
+    color: #fff !important; margin: 0 0 .4rem !important;
+  }
+  .tr-hero h1 a, .tr-hero h1 svg { display: none !important; }
+  .tr-hero p, .tr-hero p * {
+    color: rgba(255,255,255,.9) !important; font-size: .97rem;
+    line-height: 1.6; margin: 0; max-width: 62ch;
+  }
+  .tr-hero-eyebrow {
+    font-size: .68rem; font-weight: 700; letter-spacing: .13em;
+    text-transform: uppercase; color: rgba(255,255,255,.72);
+    margin-bottom: .5rem;
+  }
+  .tr-hero-points { display: flex; gap: 1.6rem; flex-wrap: wrap;
+                    margin-top: 1.1rem; }
+  .tr-hero-point { font-size: .82rem; color: rgba(255,255,255,.92) !important;
+                   display: flex; align-items: center; gap: .4rem; }
+  .tr-hero-point svg { flex: 0 0 auto; }
+
+  /* ---------- stat tiles get their accent back ---------- */
+  .tr-stat { position: relative; overflow: hidden; }
+  .tr-stat::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--tr-accent); opacity: .55;
+  }
+
   /* ---------- item card ---------- */
   .tr-item-text {
     font-size: .955rem; color: var(--tr-ink); line-height: 1.55;
@@ -291,6 +420,13 @@ _CSS_SOURCE = """
   }
   .stDownloadButton > button { border-radius: 8px; font-weight: 550; }
 
+  div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 11px !important;
+    transition: box-shadow .14s ease;
+  }
+  div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+    box-shadow: var(--tr-shadow);
+  }
   div[data-testid="stExpander"] {
     border: 1px solid var(--tr-line) !important; border-radius: 10px !important;
     background: var(--tr-surface); box-shadow: none;
@@ -385,6 +521,33 @@ def brand() -> str:
         '<span class="tr-brand-name">TRACE</span>'
         "</div>"
         '<div class="tr-brand-sub">Project Knowledge &amp; Handover System</div>'
+    )
+
+
+def hero(title: str, lede: str, eyebrow: str = "", points: list[str] | None = None) -> str:
+    """A full-width banner for the top of an entry screen."""
+    bullets = ""
+    if points:
+        bullets = (
+            '<div class="tr-hero-points">'
+            + "".join(
+                f'<span class="tr-hero-point">'
+                '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" '
+                'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" '
+                'stroke-linejoin="round"><path d="M3 8.5l3.2 3L13 5"/></svg>'
+                f"{esc(point)}</span>"
+                for point in points
+            )
+            + "</div>"
+        )
+    return (
+        '<div class="tr-hero">'
+        + (f'<div class="tr-hero-eyebrow">{esc(eyebrow)}</div>' if eyebrow else "")
+        # Streamlit's own heading colour beats the stylesheet here, so the
+        # colour is set inline where nothing can override it.
+        + f'<h1 style="color:#fff !important">{esc(title)}</h1>'
+        + f'<p style="color:rgba(255,255,255,.9) !important">{esc(lede)}</p>'
+        + f"{bullets}</div>"
     )
 
 
