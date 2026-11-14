@@ -119,6 +119,44 @@ DEFAULT_LLM_PROVIDER = "gemini"
 DEFAULT_LLM_MODEL = "gemini-3.6-flash"
 
 
+#: Values that mean "nobody has filled this in yet". The first is what
+#: .env.example ships with, so copying that file as the setup instructions
+#: say must not look like a configured provider.
+_PLACEHOLDER_SECRETS = frozenset(
+    {
+        "your-api-key-here",
+        "your-api-key",
+        "your_api_key_here",
+        "your_api_key",
+        "api-key-here",
+        "changeme",
+        "change-me",
+        "replace-me",
+        "todo",
+        "none",
+        "null",
+        "xxx",
+    }
+)
+
+
+def is_placeholder_secret(value: str | None) -> bool:
+    """True when ``value`` is missing, blank, or an unfilled placeholder.
+
+    Deliberately conservative: an exact match against a known placeholder, or
+    a value wrapped in angle brackets. A real key is never rejected by a
+    loose substring rule.
+    """
+    if value is None:
+        return True
+    cleaned = value.strip()
+    if not cleaned:
+        return True
+    if cleaned.startswith("<") and cleaned.endswith(">"):
+        return True
+    return cleaned.lower() in _PLACEHOLDER_SECRETS
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     """Resolved LLM settings. ``api_key`` is never rendered or logged."""
@@ -130,7 +168,16 @@ class LLMConfig:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.api_key)
+        """True only when a key that could actually work is present.
+
+        The setup instructions say to copy ``.env.example`` to ``.env``, which
+        leaves ``LLM_API_KEY`` holding a placeholder. Treating that as a real
+        key made TRACE report "Configured", attempt a call that could never
+        succeed, and fall back -- telling the user it had an AI provider when
+        it plainly did not. A placeholder is the absence of a key, and saying
+        so is the whole point of the product.
+        """
+        return not is_placeholder_secret(self.api_key)
 
     def describe(self) -> str:
         """A safe, human-readable summary that excludes the key itself."""

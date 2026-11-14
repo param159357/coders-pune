@@ -304,3 +304,50 @@ def test_spent_rate_limit_is_reported_as_a_rate_limit():
         client._translate(_http_error(403, {"X-RateLimit-Remaining": "0"}))
     )
     assert "rate limit" in message.lower()
+
+
+# --------------------------------------------------------------------------
+# A placeholder key is the absence of a key
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "   ", "your-api-key-here", "YOUR-API-KEY-HERE",
+     "your_api_key", "<paste your key>", "changeme", "TODO"],
+)
+def test_placeholder_keys_are_not_treated_as_configured(value):
+    assert config.is_placeholder_secret(value)
+    assert not config.LLMConfig(
+        provider="gemini", model="m", api_key=value, base_url=None
+    ).is_configured
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["AIzaSyExampleLookingKeyValue1234567890", "sk-abc123", "a" * 39],
+)
+def test_real_looking_keys_are_still_accepted(value):
+    """The placeholder rule must never reject a key someone actually pasted."""
+    assert not config.is_placeholder_secret(value)
+    assert config.LLMConfig(
+        provider="gemini", model="m", api_key=value, base_url=None
+    ).is_configured
+
+
+def test_copying_the_shipped_env_example_does_not_look_configured():
+    """Following the README's setup must not produce a false "Configured".
+
+    This reads the committed .env.example so the test fails if someone later
+    puts a value there that the placeholder rule does not recognise.
+    """
+    import re
+    from pathlib import Path
+
+    example = Path(__file__).resolve().parent.parent / ".env.example"
+    text = example.read_text(encoding="utf-8")
+    match = re.search(r"^LLM_API_KEY=(.*)$", text, re.MULTILINE)
+    assert match, ".env.example should document LLM_API_KEY"
+    assert config.is_placeholder_secret(match.group(1)), (
+        "the value shipped in .env.example must register as a placeholder, "
+        "otherwise copying it makes TRACE claim an AI provider it lacks"
+    )

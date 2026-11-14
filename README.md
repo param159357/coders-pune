@@ -1,13 +1,20 @@
 # TRACE — Project Knowledge and Handover System
 
-**Team SAMURAI** · Built for the TRACE hackathon (Round 2)
+**Team SAMURAI** · Built for the TRACE hackathon (Round 3)
+
+**Live app:** https://coders-pune-2uv6xj4cwtdbwjh69x72vl.streamlit.app/
+
+> The hosted app sleeps after a period of inactivity. If you are greeted by a
+> "this app has gone to sleep" page, click **Yes, get this app back up!** and
+> it returns in about 30 seconds. That is Streamlit Community Cloud's free
+> tier, not the application.
 
 TRACE turns scattered project records into a source-backed, reviewable handover
 so the next person can continue work without guessing.
 
-> **Honesty note:** the section [Implementation status](#9-implementation-status)
+> **Honesty note:** the section [Implementation status](#10-implementation-status)
 > states exactly what is built and verified, and
-> [Current limitations](#10-current-limitations) states what is not. Nothing is
+> [Current limitations](#11-current-limitations) states what is not. Nothing is
 > listed as working unless it was actually run.
 
 ---
@@ -45,8 +52,10 @@ weak, absent, or self-contradictory.
 Add Sources  →  Reconstruct  →  Verify Evidence  →  Human Review  →  Handover
 ```
 
-For this MVP, "Add Sources" means manual upload of PDF, DOCX, or TXT files.
-There are **no** Slack, GitHub, Teams, or email integrations.
+"Add Sources" means either uploading PDF, DOCX or TXT files, or connecting a
+GitHub repository and ingesting its recent commits, pull requests and issues
+(see [Ingesting a GitHub repository](#ingesting-a-github-repository)). There
+are **no** Slack, Teams, or email integrations.
 
 ## 4. Architecture and stack
 
@@ -228,7 +237,8 @@ Community Cloud with its Secrets UI.
 | `LLM_MODEL` | no | `gemini-3.6-flash` | Model identifier |
 | `LLM_BASE_URL` | no | — | Override the provider endpoint |
 | `TRACE_DB_PATH` | no | `data/trace.db` | SQLite file location |
-| `TRACE_MAX_UPLOAD_MB` | no | `10` | Per-file upload ceiling |
+| `TRACE_MAX_UPLOAD_MB` | no | `25` | Per-file upload ceiling |
+| `TRACE_REQUEST_CHARS` | no | `400000` | Characters sent in one reconstruction request |
 
 Google retires models over time — `gemini-2.5-flash` already returns *"no
 longer available to new users"*. If you hit that, list what your key can use
@@ -299,7 +309,8 @@ development, each for a reason worth stating:
 - **A model fallback chain.** Google's shared capacity returned 502 or 503
   often enough to fail 2 of 4 live runs during development. If the configured
   model stays unavailable, TRACE tries `gemini-3.5-flash`, then
-  `gemini-flash-latest`, then `gemini-3.1-flash-lite`. The model that actually
+  `gemini-3.1-flash-lite`, then `gemini-2.5-flash-lite`. (`gemini-flash-latest`
+  was in this chain and was removed: the alias returns 404 through the SDK.) The model that actually
   produced the draft is recorded on the reconstruction and shown in the
   report, so a handover never names a model that did not write it, and the
   substitution is disclosed in the run notes rather than hidden.
@@ -405,14 +416,28 @@ means the tests were actually executed and the app was actually run.
 | 4 — Review: edit, approve, reject, evidence inspection | **Done, verified** |
 | 5 — Export: Markdown and PDF handover report | **Done, verified** |
 | 6 — CampusConnect demo and end-to-end test | **Done, verified** |
-| 6 — Public deployment | **Not done** — needs a Gemini key and a deploy |
+| 6 — Public deployment | **Done** — live on Streamlit Community Cloud |
+
+Round 3 (the three improvements committed to at Round 2):
+
+| Improvement | Status |
+|---|---|
+| 1 — Authorised GitHub ingestion | **Done, verified** — ingests commits, pull requests and issues as evidence-bearing sources; verified end to end against a real repository (17 commits stored, with a repository link and a sync note) |
+| 2 — Role-aware views with real access control | **Done, verified** — four roles enforced in the service layer; the suite asserts each role is refused what it may not do |
+| 3 — Evidence-backed knowledge relationship map | **Done, verified against the live Gemini API** — verified on the deployed app: 2 links drawn, 0 discarded as unsupported, 4 items connected |
+
+Round 3 also delivered, beyond the three:
+
+| Work | Status |
+|---|---|
+| Capacity raised to ~150 pages per request | **Done** — `TRACE_REQUEST_CHARS` 60,000 → 400,000 |
+| Extraction and reconstruction caching | **Done** — identical bytes are not re-parsed; an unchanged run makes no AI call |
+| Adversarial robustness suite | **Done** — 26 tests covering malformed, hostile and repeated input |
+| Navigation defect fix | **Done** — the sidebar was discarding every other click |
 
 ## 11. Current limitations
 
 Stated plainly, because an honest limitation is worth more than an overclaim.
-
-- **Not deployed yet.** There is no public URL. Everything below has been
-  verified locally only.
 
 - **Accounts are local to each deployment.** TRACE stores its own accounts
   (scrypt-hashed passwords); there is no SSO, no email verification and no
@@ -460,16 +485,69 @@ Stated plainly, because an honest limitation is worth more than an overclaim.
 - Secrets, local databases, and uploaded files are excluded from version
   control.
 
-## 14. Planned Round 3 improvements
+## 14. The three Round 3 improvements — delivered
 
-Planned, **not** implemented in Round 2:
+These are the three improvements committed to at Round 2. All three are
+built, and each was verified by running it, not by reading the code.
 
-1. **Authorised GitHub integration** — ingest commits, pull requests, and issues
-   through an authorised connection, preserving source links and permissions.
-2. **Role-aware handover views** — distinct views for incoming developers and
-   project managers, enforced by real access checks rather than hidden UI.
-3. **Knowledge relationship map** — navigable, evidence-backed relationships
-   between decisions, tasks, blockers, dependencies, and owners.
+1. **Authorised GitHub integration** — *delivered.* Ingests commits, pull
+   requests and issues through an authorised connection. Each record becomes
+   an ordinary source, so the same chunking, validation, evidence
+   verification, review and export apply unchanged, and every citation
+   carries the permanent GitHub URL of the record it quotes. A public
+   repository needs no token; a private one takes a fine-grained token that
+   is used for a single fetch and never written to the database.
+   *Verified:* ingesting a real repository stored a repository link and 17
+   commits as an evidence-bearing source.
+
+2. **Role-aware handover views** — *delivered.* Four roles (owner, project
+   manager, incoming developer, viewer), each landing on the screen where
+   their work begins. Enforced in the service layer rather than by hiding
+   buttons: a viewer requesting a source document receives `AccessDenied`
+   from `DocumentService`, and `ReviewService.list_items` filters to approved
+   items before returning. *Verified:* the suite has each role attempt what
+   it must not do and asserts the call raises.
+
+3. **Knowledge relationship map** — *delivered.* Six relation types a source
+   can actually state, drawn in deterministic lanes by category. A
+   relationship carries its own quotation and is verified exactly as an
+   item's evidence is, and **a link with no source support is not drawn** —
+   the map reports how many were proposed and how many discarded, so the gap
+   is visible. *Verified on the deployed app:* 2 links drawn, 0 discarded, 4
+   items connected.
+
+## 15. Roadmap
+
+Honest about sequence: the first group is what the current design is already
+shaped for, the second changes assumptions the product currently rests on.
+
+**Next — completing the current design**
+
+- **Session persistence across a reload.** Today a refresh ends the session
+  (no data is lost). The fix is a signed, expiring token in an HTTP-only
+  cookie. It is deliberately not a URL token, which would make a session
+  shareable by copying the address bar.
+- **Near-duplicate detection.** Deduplication is byte-exact, so a lightly
+  edited revision is ingested twice. Shingling over extracted text would
+  catch revisions without weakening the exact-quotation guarantee.
+- **OCR for scanned documents.** Image-only PDFs currently report `No text
+  found`. OCR text is lower confidence than embedded text, so it needs its
+  own evidence tier rather than being silently mixed in.
+- **Slack and Teams ingestion**, reusing the GitHub connector's shape:
+  authorised, metadata-only, every claim quoted back to a permalink.
+
+**Later — changes that alter the honesty story**
+
+- **Retrieval for corpora beyond ~150 pages.** Past the single-request
+  envelope the model stops seeing everything, so "we checked all of it" stops
+  being true. Retrieval has to arrive together with an interface that states
+  what was and was not examined.
+- **Semantic evidence matching.** Exact matching currently marks a correct
+  paraphrase unsupported, which fails safe. Any move to embeddings has to
+  keep a verbatim tier distinct from a similarity tier, or the central
+  guarantee weakens.
+- **Multi-project organisations** — shared membership, audit history across
+  projects, and SSO in place of local accounts.
 
 ---
 
