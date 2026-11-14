@@ -200,6 +200,19 @@ class GitHubClient:
                         else " for this token. Wait and try again."
                     )
                 )
+            if anonymous:
+                # No token was supplied, so blaming the token is wrong and
+                # sends the user looking for a setting they never set. A 403
+                # on an anonymous request means GitHub would not serve it
+                # without credentials, or something between TRACE and GitHub
+                # refused it.
+                return GitHubAuthError(
+                    "GitHub refused an anonymous request for that repository. "
+                    "If it is private, add a fine-grained access token that "
+                    "can read it. If it is public, the request was blocked "
+                    "before it reached GitHub — check the network allows "
+                    "api.github.com."
+                )
             return GitHubAuthError(
                 "The token does not grant access to that repository. A "
                 "fine-grained token must list the repository and allow "
