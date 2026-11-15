@@ -216,9 +216,11 @@ waiting on an external approval. TRACE now models those links and draws them.
   reconstruction always draws the same picture, which matters when comparing runs.
 
 **How to verify it:** open Knowledge Map on a reconstructed project. Verified on
-the deployed application, signed in as a new account and reconstructing the demo
-from scratch against a live `gemini-3.6-flash` call: 2 links drawn, 0 discarded as
-unsupported, 4 items connected. When a corpus states no relationships the map says
+the deployed application against a live `gemini-3.6-flash` call: on the shared
+demo as it currently stands, 3 links drawn, 0 discarded as unsupported, 5 items
+connected. Those counts are what that reconstruction supported, not a fixed
+property of the demo — re-running can find a different number, and the panel
+always reports how many were proposed against how many survived verification. When a corpus states no relationships the map says
 so rather than inventing connections — that empty state is the feature working,
 not failing.
 

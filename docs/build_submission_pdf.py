@@ -363,11 +363,14 @@ def section_improvements():
         "behind each one.",
     ]))
     out.append(callout(
-        "<b>Verified on the deployed application</b>, signed in as a new account and "
-        "reconstructing the demo project from scratch: 2 links drawn, 0 discarded as "
-        "unsupported, 4 items connected, against a live "
-        "<font face='Courier'>gemini-3.6-flash</font> call. When a corpus states no "
-        "relationships, the map says so instead of inventing connections."
+        "<b>Verified on the deployed application</b> against a live "
+        "<font face='Courier'>gemini-3.6-flash</font> call: on the shared demo as it "
+        "currently stands, 3 links drawn, 0 discarded as unsupported, 5 items "
+        "connected. Those counts are what that reconstruction supported rather than "
+        "a fixed property of the demo - re-running can find a different number, and "
+        "the panel always reports how many were proposed against how many survived "
+        "verification. When a corpus states no relationships, the map says so "
+        "instead of inventing connections."
     ))
     out.append(PageBreak())
     return out
@@ -661,7 +664,7 @@ def section_testing():
             ["Journey", "Result"],
             ["Clone, venv, install, copy env file, run", "Works from a clean directory following only the README"],
             ["Sign up, load demo, reconstruct, review, export", "Completes end to end on the deployed application"],
-            ["Knowledge map on the deployed app", "2 links drawn, 0 discarded, 4 items connected, live model call"],
+            ["Knowledge map on the deployed app", "3 links drawn, 0 discarded, 5 items connected, live model call"],
             ["GitHub ingestion of a real repository", "Repository link plus 17 commits stored as an evidence-bearing source"],
             ["Browser refresh mid-session", "Session ends; no data lost. Project and sources intact after signing back in"],
             ["Second click on Reconstruct", "Cannot land: the control is gone while a run is in flight"],
