@@ -32,13 +32,17 @@ from trace_app.security.authz import (
     assignable_roles,
 )
 from trace_app.services.auth_service import AuthError, AuthService
-from trace_app.services.demo_service import (
-    DEMO_ACCOUNTS,
-    DEMO_PASSWORD,
-    DEMO_ROLE_BLURBS,
-    DemoService,
-    ensure_public_demo,
-)
+# Imported as a module rather than by name on purpose.
+#
+# Streamlit Community Cloud can redeploy app.py while keeping an older copy
+# of an already-imported module in memory. A `from ... import new_symbol`
+# then raises ImportError at startup and the whole app serves an error page
+# until someone reboots it by hand -- which is exactly what happened when
+# this panel was first deployed. Going through the module means a stale
+# cache costs the demo panel, not the entire product, and _render_demo_sign_in
+# checks before using anything added recently.
+from trace_app.services import demo_service
+from trace_app.services.demo_service import DemoService
 from trace_app.services.github_service import GitHubService
 from trace_app.services.document_service import DocumentService, extraction_summary
 from trace_app.services.extraction_service import segments_from_json
@@ -151,7 +155,7 @@ def _public_demo_project_id() -> str | None:
     render.
     """
     try:
-        project = ensure_public_demo(_database())
+        project = demo_service.ensure_public_demo(_database())
     except Exception:  # pragma: no cover - never block sign-in over the demo
         logger.exception("Could not seed the shared demo project")
         return None
@@ -1893,6 +1897,12 @@ def _render_demo_sign_in(auth: AuthService) -> None:
     path, so there is no way in here that a visitor could not take by typing
     the credentials into the form below.
     """
+    if not hasattr(demo_service, "ensure_public_demo"):
+        # A stale module cache after a redeploy. Degrade to the ordinary
+        # sign-in form rather than taking the page down.
+        logger.warning("demo_service has no ensure_public_demo; skipping panel")
+        return
+
     project_id = _public_demo_project_id()
     if project_id is None:
         return  # this deployment ships no demo sources
@@ -1904,14 +1914,17 @@ def _render_demo_sign_in(auth: AuthService) -> None:
         "Four accounts on one shared synthetic project. Same data, different "
         "role, so you can watch the access checks refuse things instead of "
         "taking the claim on trust. Every account uses the password "
-        f"<code>{ui.esc(DEMO_PASSWORD)}</code>, so you can type them into the "
+        f"<code>{ui.esc(demo_service.DEMO_PASSWORD)}</code>, so you can type "
+        "them into the "
         "form below instead if you prefer."
         "</div></div>",
         unsafe_allow_html=True,
     )
 
-    columns = st.columns(len(DEMO_ACCOUNTS), gap="small")
-    for column, (email, _display, role) in zip(columns, DEMO_ACCOUNTS):
+    accounts = demo_service.DEMO_ACCOUNTS
+    blurbs = getattr(demo_service, "DEMO_ROLE_BLURBS", {})
+    columns = st.columns(len(accounts), gap="small")
+    for column, (email, _display, role) in zip(columns, accounts):
         with column:
             if st.button(
                 ROLE_LABELS[role],
@@ -1920,7 +1933,9 @@ def _render_demo_sign_in(auth: AuthService) -> None:
                 type="primary" if role == "manager" else "secondary",
             ):
                 try:
-                    user = auth.authenticate(email, DEMO_PASSWORD)
+                    user = auth.authenticate(
+                        email, demo_service.DEMO_PASSWORD
+                    )
                 except AuthError as exc:
                     st.error(str(exc))
                 else:
@@ -1928,7 +1943,7 @@ def _render_demo_sign_in(auth: AuthService) -> None:
             st.markdown(
                 f'<div class="tr-note" style="margin:-.35rem 0 .9rem">'
                 f"<code>{ui.esc(email)}</code><br/>"
-                f"{ui.esc(DEMO_ROLE_BLURBS.get(role, ''))}</div>",
+                f"{ui.esc(blurbs.get(role, ''))}</div>",
                 unsafe_allow_html=True,
             )
 

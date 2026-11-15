@@ -477,3 +477,27 @@ def test_a_restricted_role_is_not_told_how_many_citations_exist(
         assert reviews.sees_only_approved() is hidden, (
             f"{email}: sees_only_approved() should be {hidden}"
         )
+
+
+def test_app_imports_demo_service_as_a_module_not_by_name():
+    """Guard the deployment against a stale module cache.
+
+    Streamlit Community Cloud can redeploy app.py while keeping an older
+    copy of an already-imported module in memory. A `from x import
+    new_symbol` then raises ImportError at startup and the whole app serves
+    an error page until a human reboots it -- which is what happened when the
+    demo panel first shipped. Going through the module downgrades that to a
+    missing panel.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent / "app.py").read_text(
+        encoding="utf-8"
+    )
+    assert "from trace_app.services import demo_service" in source
+    for symbol in ("DEMO_ROLE_BLURBS", "ensure_public_demo"):
+        assert f"    {symbol},\n" not in source, (
+            f"{symbol} is imported by name from demo_service; import the "
+            "module and use demo_service." + symbol + " instead, so a stale "
+            "module cache cannot take the whole app down"
+        )
