@@ -54,11 +54,31 @@ class DemoResult:
 #: interface on purpose: these exist only to demonstrate access control on
 #: synthetic data, and they are flagged is_demo in the database.
 DEMO_PASSWORD = "tracedemo2026"
+
+#: The account that owns the shared demo project. Listed first because a
+#: visitor signing in as the owner can reach the Access screen, which is
+#: where the role model is easiest to see.
+DEMO_OWNER_ACCOUNT: tuple[str, str, str] = (
+    "owner@campusconnect.demo",
+    "Dana (Project owner)",
+    "owner",
+)
+
 DEMO_ACCOUNTS: tuple[tuple[str, str, str], ...] = (
+    DEMO_OWNER_ACCOUNT,
     ("manager@campusconnect.demo", "Priya (Project manager)", "manager"),
     ("developer@campusconnect.demo", "Sam (Incoming developer)", "developer"),
     ("viewer@campusconnect.demo", "Alex (Viewer)", "viewer"),
 )
+
+#: What each demo role is worth looking at, shown next to its credentials on
+#: the sign-in screen so a visitor knows why they would pick one over another.
+DEMO_ROLE_BLURBS: dict[str, str] = {
+    "owner": "Everything, plus the Access screen where roles are granted.",
+    "manager": "Add sources, run a reconstruction, approve and reject items.",
+    "developer": "Read every item and its sources, and export. Cannot change anything.",
+    "viewer": "Only the approved handover. Source documents and unreviewed items are refused.",
+}
 
 
 class DemoService:
@@ -178,3 +198,48 @@ class DemoService:
             created=created,
             files_added=added,
         )
+
+
+# --------------------------------------------------------------------------
+# The shared, publicly reachable demo
+# --------------------------------------------------------------------------
+
+def demo_files_present() -> bool:
+    """Whether this deployment ships the demo sources at all."""
+    return DEMO_DIR.is_dir() and any(
+        (DEMO_DIR / name).is_file() for name in DEMO_FILES
+    )
+
+
+def ensure_public_demo(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    """Make sure the shared demo project and its role accounts exist.
+
+    A visitor arriving at the sign-in screen has no account, so the demo
+    credentials printed there have to work on a deployment where nobody has
+    loaded the demo yet. This seeds it on demand, owned by the demo owner
+    account rather than by whoever happens to arrive first.
+
+    Idempotent: safe to call on every render of the sign-in screen. Returns
+    the demo project, or None when the deployment has no demo sources.
+    """
+    if not demo_files_present():
+        return None
+
+    auth = AuthService(connection)
+    email, display_name, _role = DEMO_OWNER_ACCOUNT
+
+    owner = auth.find_by_email(email)
+    if owner is None:
+        try:
+            owner = auth.register(
+                email, DEMO_PASSWORD, display_name, is_demo=True
+            )
+        except Exception:  # pragma: no cover - lost a race; reuse the winner
+            owner = auth.find_by_email(email)
+    if owner is None:  # pragma: no cover - registration genuinely failed
+        return None
+
+    # DemoService.load() is already idempotent and seeds the other roles, so
+    # the shared demo is just that loader run as the demo owner.
+    result = DemoService(connection, owner).load()
+    return result.project if result.ok else None

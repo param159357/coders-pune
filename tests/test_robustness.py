@@ -351,3 +351,129 @@ def test_copying_the_shipped_env_example_does_not_look_configured():
         "the value shipped in .env.example must register as a placeholder, "
         "otherwise copying it makes TRACE claim an AI provider it lacks"
     )
+
+
+# --------------------------------------------------------------------------
+# The public demo a judge is invited to use
+# --------------------------------------------------------------------------
+
+def test_the_public_demo_seeds_itself_on_an_empty_database(connection, isolated_storage):
+    """The sign-in screen prints these credentials, so they must work cold.
+
+    A visitor arrives before anyone has loaded the demo. If seeding only
+    happened after a signed-in user pressed a button, the credentials printed
+    on the sign-in screen would simply fail.
+    """
+    from trace_app.services.auth_service import AuthService
+    from trace_app.services.demo_service import (
+        DEMO_ACCOUNTS,
+        DEMO_PASSWORD,
+        ensure_public_demo,
+    )
+
+    project = ensure_public_demo(connection)
+    assert project is not None
+
+    auth = AuthService(connection)
+    for email, _display, _role in DEMO_ACCOUNTS:
+        user = auth.authenticate(email, DEMO_PASSWORD)
+        assert user is not None, f"{email} must be able to sign in"
+
+
+def test_each_demo_account_holds_the_role_it_advertises(connection, isolated_storage):
+    """The panel names a role beside each address; the database must agree."""
+    from trace_app.services.auth_service import AuthService
+    from trace_app.services.demo_service import DEMO_ACCOUNTS, ensure_public_demo
+
+    project = ensure_public_demo(connection)
+    assert project is not None
+    auth = AuthService(connection)
+
+    for email, _display, role in DEMO_ACCOUNTS:
+        user = auth.find_by_email(email)
+        assert user is not None
+        principal = auth.principal_for(user, project["id"])
+        assert principal.role == role, (
+            f"{email} is advertised as {role} but holds {principal.role}"
+        )
+
+
+def test_seeding_the_public_demo_twice_changes_nothing(connection, isolated_storage):
+    """It runs once per process, but a restart or a race must be harmless."""
+    from trace_app.services.demo_service import ensure_public_demo
+
+    first = ensure_public_demo(connection)
+    second = ensure_public_demo(connection)
+    assert first is not None and second is not None
+    assert first["id"] == second["id"], "a second call must not make a second project"
+
+    sources = connection.execute(
+        "SELECT COUNT(*) FROM sources WHERE project_id = ?", (first["id"],)
+    ).fetchone()[0]
+    assert sources == 4, f"expected the 4 demo sources, found {sources}"
+
+
+def test_the_demo_viewer_cannot_reach_the_sources(connection, isolated_storage):
+    """The panel promises the viewer is refused; that must be true."""
+    from trace_app.security.authz import AccessDenied
+    from trace_app.services.auth_service import AuthService
+    from trace_app.services.demo_service import ensure_public_demo
+
+    project = ensure_public_demo(connection)
+    assert project is not None
+    auth = AuthService(connection)
+    viewer = auth.find_by_email("viewer@campusconnect.demo")
+    principal = auth.principal_for(viewer, project["id"])
+
+    documents = DocumentService(connection, principal)
+    try:
+        found = documents.list_sources(project["id"])
+    except AccessDenied:
+        return
+    assert found == [], "the demo viewer must not receive the source documents"
+
+
+def test_a_role_that_cannot_reconstruct_is_not_told_to_reconstruct():
+    """The empty review state must not send a viewer to a page they lack.
+
+    A viewer has no Project Workspace in their navigation and would be
+    refused the action, so pointing them at it is a dead end.
+    """
+    from trace_app.security.authz import Capability, Role, ROLE_CAPABILITIES
+
+    assert Capability.RUN_RECONSTRUCTION not in ROLE_CAPABILITIES[Role.VIEWER]
+    assert Capability.RUN_RECONSTRUCTION not in ROLE_CAPABILITIES[Role.DEVELOPER]
+    assert Capability.RUN_RECONSTRUCTION in ROLE_CAPABILITIES[Role.MANAGER]
+
+
+def test_a_restricted_role_is_not_told_how_many_citations_exist(
+    connection, isolated_storage
+):
+    """The verification figures describe items a viewer may not see.
+
+    "24 citations checked" shown to someone who is shown none of those items
+    reports the volume of hidden content -- the same leak the review counts
+    already avoid. sees_only_approved() is what the page branches on, so it
+    must be true for exactly the roles that are shown a filtered list.
+    """
+    from trace_app.services.auth_service import AuthService
+    from trace_app.services.demo_service import ensure_public_demo
+    from trace_app.services.review_service import ReviewService
+
+    project = ensure_public_demo(connection)
+    assert project is not None
+    auth = AuthService(connection)
+
+    expected = {
+        "owner@campusconnect.demo": False,
+        "manager@campusconnect.demo": False,
+        "developer@campusconnect.demo": False,
+        "viewer@campusconnect.demo": True,
+    }
+    for email, hidden in expected.items():
+        user = auth.find_by_email(email)
+        principal = auth.principal_for(user, project["id"])
+        reviews = ReviewService(connection, principal)
+        assert reviews.sees_only_approved() is hidden, (
+            f"{email}: sees_only_approved() should be {hidden}"
+        )

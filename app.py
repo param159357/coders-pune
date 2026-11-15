@@ -6,6 +6,7 @@ Run with:  streamlit run app.py
 from __future__ import annotations
 
 import html
+import logging
 
 import streamlit as st
 
@@ -31,7 +32,13 @@ from trace_app.security.authz import (
     assignable_roles,
 )
 from trace_app.services.auth_service import AuthError, AuthService
-from trace_app.services.demo_service import DEMO_ACCOUNTS, DEMO_PASSWORD, DemoService
+from trace_app.services.demo_service import (
+    DEMO_ACCOUNTS,
+    DEMO_PASSWORD,
+    DEMO_ROLE_BLURBS,
+    DemoService,
+    ensure_public_demo,
+)
 from trace_app.services.github_service import GitHubService
 from trace_app.services.document_service import DocumentService, extraction_summary
 from trace_app.services.extraction_service import segments_from_json
@@ -66,6 +73,9 @@ NAV_PAGES = [
 # --------------------------------------------------------------------------
 # Shared resources
 # --------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
+
 
 @st.cache_resource(show_spinner=False)
 def _database():
@@ -128,6 +138,39 @@ def _github_service(project_id: str | None = None) -> GitHubService:
 def _demo_service() -> DemoService | None:
     user = _current_user()
     return DemoService(_database(), user) if user else None
+
+
+@st.cache_resource(show_spinner=False)
+def _public_demo_project_id() -> str | None:
+    """Seed the shared demo once per server process and return its ID.
+
+    The sign-in screen prints demo credentials, so those accounts have to
+    exist on a deployment where nobody has loaded the demo yet -- otherwise
+    the credentials a judge is invited to use would simply fail. Cached as a
+    resource so the seeding runs once per process rather than on every
+    render.
+    """
+    try:
+        project = ensure_public_demo(_database())
+    except Exception:  # pragma: no cover - never block sign-in over the demo
+        logger.exception("Could not seed the shared demo project")
+        return None
+    return str(project["id"]) if project else None
+
+
+def _sign_in_as_demo(user: dict, project_id: str | None) -> None:
+    """Sign a visitor in as a demo role and land them inside the project.
+
+    Routed through the same _open_project used everywhere else, so the role
+    decides the landing screen: an owner starts in the workspace, a viewer in
+    the handover they are allowed to read.
+    """
+    st.session_state["user_id"] = str(user["id"])
+    st.session_state.pop("project_id", None)
+    if project_id:
+        _open_project(project_id)
+    else:  # pragma: no cover - demo sources missing
+        _goto(PAGE_DASHBOARD)
 
 
 def _goto(page: str, project_id: str | None = None) -> None:
@@ -692,8 +735,11 @@ def _render_reconstruction_section(project: dict) -> None:
 
 
 def _render_draft_summary(project: dict, latest: dict) -> None:
-    del project
     reconstructions = _reconstruction_service()
+    # Only roles that may see every item reach this screen, but the panel is
+    # asked rather than assumed, so a future change to who can get here
+    # cannot quietly start reporting hidden counts.
+    reviews = _review_service(str(project["id"]))
     summary = reconstructions.evidence_summary(latest["id"])
     total = sum(summary.values())
     if not total:
@@ -717,7 +763,7 @@ def _render_draft_summary(project: dict, latest: dict) -> None:
         f'<div style="margin:0.45rem 0 0.2rem">{pills}</div>', unsafe_allow_html=True
     )
 
-    _render_verification_panel(latest)
+    _render_verification_panel(latest, can_see_all=not reviews.sees_only_approved())
 
     missing = reconstructions.missing_information(latest)
     if missing:
@@ -1208,15 +1254,33 @@ def _render_review_item(item: dict, reconstruction_id: str) -> None:
                 st.rerun()
 
 
-def _render_verification_panel(latest: dict) -> None:
+def _render_verification_panel(latest: dict, can_see_all: bool = True) -> None:
     """Show what evidence checking actually did.
 
     This is the product's whole claim -- that a model cannot make an
     unsupported statement look supported -- so it belongs on the page as
     figures, not buried in an expander.
+
+    The figures cover the whole run, including items a restricted role is not
+    allowed to see. Printing "24 citations checked" to a viewer who is shown
+    none of them reports the volume of hidden content, which is the same leak
+    the review counts were already careful to avoid. Those roles get the
+    assurance without the arithmetic.
     """
     counts = _reconstruction_service().verification_counts(latest)
     if not counts or not counts.get("evidence_total"):
+        return
+
+    if not can_see_all:
+        st.markdown(
+            '<div class="tr-note" style="margin:.4rem 0 .2rem">'
+            "Every claim shown here was checked against the source it names "
+            "before it was stored: the source has to exist in this project, "
+            "the quotation has to occur in it, and the location is recomputed "
+            "from where the quotation was actually found."
+            "</div>",
+            unsafe_allow_html=True,
+        )
         return
 
     total = int(counts.get("evidence_total", 0))
@@ -1342,10 +1406,21 @@ def _render_review(service: ProjectService) -> None:
     _render_stepper(project)
 
     if latest is None or str(latest["status"]) != ReconstructionStatus.DRAFT_READY:
-        st.info(
-            "There is no draft to review yet. Run a reconstruction from the "
-            "Project Workspace first."
-        )
+        # Telling someone to go and do a thing their role forbids is a dead
+        # end: a viewer has no Project Workspace and cannot run a
+        # reconstruction, so they would be sent to a page that is not in
+        # their navigation to press a button they would be refused.
+        if reviews.principal.can(Capability.RUN_RECONSTRUCTION):
+            st.info(
+                "There is no draft to review yet. Run a reconstruction from "
+                "the Project Workspace first."
+            )
+        else:
+            st.info(
+                "No handover has been prepared for this project yet. A "
+                "project manager or the owner needs to run a reconstruction "
+                "before there is anything here to read."
+            )
         return
 
     if latest["is_demo_preview"]:
@@ -1383,7 +1458,7 @@ def _render_review(service: ProjectService) -> None:
         st.markdown(ui.note(summary), unsafe_allow_html=True)
 
     st.markdown(ui.divider(), unsafe_allow_html=True)
-    _render_verification_panel(latest)
+    _render_verification_panel(latest, can_see_all=not reviews.sees_only_approved())
     _render_demo_pointers(project)
 
     missing = reconstructions.missing_information(latest)
@@ -1805,6 +1880,72 @@ def _sign_in_user(user: dict) -> None:
     st.rerun()
 
 
+def _render_demo_sign_in(auth: AuthService) -> None:
+    """One-click sign-in as each demo role, with the credentials in plain view.
+
+    A judge arrives with no account. Making them register first puts a form
+    between them and the product, and it hides the thing most worth seeing:
+    the same project through four roles, with the access checks refusing
+    things rather than hiding buttons.
+
+    These buttons are a convenience, not a side door. Each one authenticates
+    with the published password through the ordinary AuthService.authenticate
+    path, so there is no way in here that a visitor could not take by typing
+    the credentials into the form below.
+    """
+    project_id = _public_demo_project_id()
+    if project_id is None:
+        return  # this deployment ships no demo sources
+
+    st.markdown(
+        '<div class="tr-panel" style="margin-bottom:.9rem">'
+        '<div class="tr-title">Try it now &mdash; no sign-up needed</div>'
+        '<div class="tr-desc" style="margin-top:.35rem">'
+        "Four accounts on one shared synthetic project. Same data, different "
+        "role, so you can watch the access checks refuse things instead of "
+        "taking the claim on trust. Every account uses the password "
+        f"<code>{ui.esc(DEMO_PASSWORD)}</code>, so you can type them into the "
+        "form below instead if you prefer."
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    columns = st.columns(len(DEMO_ACCOUNTS), gap="small")
+    for column, (email, _display, role) in zip(columns, DEMO_ACCOUNTS):
+        with column:
+            if st.button(
+                ROLE_LABELS[role],
+                key=f"demo_signin_{role}",
+                width="stretch",
+                type="primary" if role == "manager" else "secondary",
+            ):
+                try:
+                    user = auth.authenticate(email, DEMO_PASSWORD)
+                except AuthError as exc:
+                    st.error(str(exc))
+                else:
+                    _sign_in_as_demo(user, project_id)
+            st.markdown(
+                f'<div class="tr-note" style="margin:-.35rem 0 .9rem">'
+                f"<code>{ui.esc(email)}</code><br/>"
+                f"{ui.esc(DEMO_ROLE_BLURBS.get(role, ''))}</div>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown(
+        '<div class="tr-note" style="margin-bottom:.4rem">'
+        "<strong>Start as Project manager</strong> if the project has no "
+        "draft yet &mdash; that role can run the reconstruction, after which "
+        "the other three have something to read. The demo project is shared "
+        "by everyone trying it, so you may also find items another visitor "
+        "already decided on; re-running the reconstruction returns every "
+        "item to <em>proposed</em>."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(ui.divider(), unsafe_allow_html=True)
+
+
 def _render_auth_screen() -> None:
     """Sign in or create an account. Nothing else is reachable until then."""
     st.markdown(
@@ -1823,6 +1964,7 @@ def _render_auth_screen() -> None:
     st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
 
     auth = _auth_service()
+    _render_demo_sign_in(auth)
     left, right = st.columns([1, 1], gap="large")
 
     with left:
@@ -1874,20 +2016,6 @@ def _render_auth_screen() -> None:
         unsafe_allow_html=True,
     )
 
-    # Shown only once the demo has been loaded on this deployment, so a judge
-    # can see the access checks refuse things rather than take it on trust.
-    if auth.find_by_email(DEMO_ACCOUNTS[0][0]) is not None:
-        st.markdown('<div style="height:.8rem"></div>', unsafe_allow_html=True)
-        lines = "\n".join(
-            f"- `{email}` — {ROLE_LABELS[role]}"
-            for email, _, role in DEMO_ACCOUNTS
-        )
-        st.info(
-            "**Demo accounts are loaded on this deployment.** Sign in as any of "
-            f"them with the password `{DEMO_PASSWORD}` to see the same project "
-            f"through a different role:\n\n{lines}\n\n"
-            "They exist only to demonstrate access control on synthetic data."
-        )
 
 
 # --------------------------------------------------------------------------
