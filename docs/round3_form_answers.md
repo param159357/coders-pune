@@ -4,6 +4,170 @@ Paste-ready text for each field of the submission form. One section per field.
 
 ---
 
+## FIELD: Short fields
+
+- **Name of the hackathon:** CodersInPune
+- **Team Name:** SAMURAI  *(exactly as in Rounds 1 and 2)*
+- **Team Leader — Full Name:** Param Raj Singh
+- **Team Leader — Email:** the same address used in Rounds 1 and 2
+- **Team Members (one per line):** Param Raj Singh
+- **The final working project link:**
+  `https://coders-pune-2uv6xj4cwtdbwjh69x72vl.streamlit.app/`
+- **The final source-code repository:**
+  `https://github.com/param159357/coders-pune`
+- **Google Drive link to the final product PDF:** upload
+  `TRACE_Round3_Submission.pdf`, set sharing to "Anyone with the link" as
+  Viewer, then paste the link
+
+---
+
+## FIELD: The complete list of features
+
+Accounts and access
+Email and password sign-in, passwords hashed with scrypt
+One-click demo sign-in as each of four roles, credentials shown on the sign-in screen
+Per-project membership with four roles: owner, project manager, incoming developer, viewer
+Eleven distinct capabilities enforced in the service layer, not by hiding buttons
+Role re-read from the database on every call, so revoking access takes effect immediately
+Role-aware landing: each member arrives on the screen their role can actually use
+Access screen for granting and revoking roles, restricted to the project owner
+
+Adding sources
+Upload PDF, DOCX and TXT, up to 25 MB per file
+Three validation checks before a byte is stored: extension, size, and leading bytes matching the declared type
+Stored filenames generated from the source ID, so a user-supplied name can never build a path
+Text extraction with per-segment locations: page numbers for PDF, paragraph indices for DOCX and TXT
+Honest extraction statuses: a scanned PDF with no text layer reports "No text found"
+Per-file reporting, so one encrypted or corrupt file never aborts a batch
+Byte-exact duplicate detection within a project
+Reuse of an existing extraction across projects you already belong to, so the same file is never parsed twice
+GitHub repository ingestion: commits, pull requests and issues as evidence-bearing sources
+Private repositories via a fine-grained token that is used once and never stored
+Preview of any source's extracted text with its source locations
+
+Reconstruction
+Google Gemini via structured JSON output, validated with Pydantic before anything is stored
+Ten handover categories: overview, decisions, tasks in progress, blockers, dependencies, risks, owners, environment, open questions, next actions
+Explicit detection of contradictions between sources
+Explicit reporting of information the sources never state
+Document text treated as untrusted data, so an uploaded file cannot redirect the model
+Deterministic keyword fallback when no provider is configured or the provider is unreachable, labelled as not-from-a-model everywhere it appears
+Reconstruction caching by input fingerprint: an unchanged re-run makes no AI call and keeps existing review decisions
+"Re-run even if unchanged" override
+Up to 400,000 characters per request, roughly 150 pages in a single pass
+Bounded retries on availability failures only, plus a model fallback chain
+The model that actually answered is recorded and named in the report
+
+Evidence verification
+Every citation checked against the source it names before it is stored
+Invented source IDs, and IDs belonging to another project, are discarded
+The quotation must occur in the named source, compared with whitespace and case normalised
+The location is recomputed from the segment the quotation was found in, so a wrong page number is corrected
+Evidence status can only be lowered relative to what the model claimed, never raised
+An owner or a due date is dropped unless something verified supports it
+A verification summary showing citations checked, matched, rejected and items downgraded
+
+Review and handover
+Every item requires an explicit human decision; nothing is approved by default
+Approve, reject, and edit item text, with the decision history retained
+Filter by awaiting review, needs a closer look, or approved
+Evidence inspection per item: source, location and exact quotation
+Permanent GitHub URL shown for any claim drawn from a repository record
+Workflow stepper on every project screen showing where the project stands
+Export to Markdown and to PDF, approved items only
+Optional inclusion of still-unreviewed items, off by default and labelled when on
+Report preview before downloading
+
+Knowledge relationship map
+Six relation types a source can state: blocks, depends on, resulted in, addresses, owned by, relates to
+Every link carries its own quotation and is verified exactly as an item's evidence is
+Links with no source support are discarded and never drawn
+Counts of how many links were proposed against how many survived verification
+Deterministic layout in lanes by category, so the same reconstruction always draws the same picture
+Select any item to highlight it, read its evidence, and list every link it takes part in
+
+Operational
+Runs with no API key, showing a clear "Not configured" state and offering no AI reconstruction
+A placeholder API key is treated as no key, so copying the example env file cannot produce a false "Configured"
+Forward-only versioned SQLite migrations, currently at schema version 7
+One-click synthetic CampusConnect demo carrying a planted contradiction and two documented absences
+
+---
+
+## FIELD: Technical architecture and implementation summary
+
+**Shape.** A modular monolith: one Streamlit application with strictly separated
+modules. No microservices, no queues, no vector database, no separate frontend.
+At this size each of those would add failure modes without removing any.
+
+**Components and how they talk to each other.** `app.py` holds Streamlit pages
+and routing only, and contains no business logic. Everything it needs it asks of
+a service: auth, project, document, extraction, reconstruction, evidence, review,
+report, github, demo. Services never talk to each other through the UI — they
+take a `Principal` at construction and reach the database through a repository
+layer, so a capability check cannot be skipped by calling a different entry
+point. `database/` owns the connection, forward-only versioned migrations
+(currently schema 7) and the repositories. `trace_app/security/` owns roles,
+capabilities and scrypt password hashing. `trace_app/ai/` owns the provider
+client, prompts, Pydantic schemas and the deterministic offline preview.
+`trace_app/integrations/github.py` is a self-contained client.
+
+**Data flow.** A file is validated (extension, size, magic bytes), stored under a
+generated name, and extracted into text plus *located segments* — tuples of
+(index, location label, text, start offset, end offset, optional URL) whose
+offsets index exactly back into the reassembled text. A GitHub record enters the
+same pipeline at the same point, which is why ingesting a repository required no
+change to review, verification or export. Segments are chunked to a character
+budget and sent to the model, which returns structured JSON. Pydantic validates
+the shape; the evidence service then verifies the content; only what survives is
+written. Review decisions attach to stored items, and export reads only approved
+ones.
+
+**Models and APIs.** Google Gemini (`gemini-3.6-flash` by default) called through
+`google-genai` with structured JSON output and `thinking_budget=0`. Measured on
+the demo corpus, thinking enabled returned a truncated 2.4 KB reply in 27.8 s;
+disabled, a complete 12.5 KB reply in 11.3 s — reconstruction is structured
+extraction with exact quoting, not open reasoning. Three retries on availability
+failures only, then a fallback chain; a rejected key or retired model fails
+immediately. The GitHub REST API is called over urllib with no SDK. Both are
+optional: the app runs and is honest about it with neither configured.
+
+**Infrastructure.** Streamlit Community Cloud, deploying from the public GitHub
+repository on push. SQLite on the container's disk. The Gemini key lives in
+Streamlit's secrets manager and is read through the same accessor as local
+environment variables, so one code path serves both. Python 3.11+, seven
+dependencies, none added in Round 3 — scrypt, hmac, secrets and urllib are all
+standard library, and the relationship map is hand-built SVG.
+
+**The hardest problem we solved: making a model's output checkable rather than
+trusted.**
+
+It is easy to ask a model to cite its sources. The hard part is that a citation
+is itself model output, so it can be wrong in three independent ways — the source
+ID can be invented, the quotation can be a paraphrase the model believes it read,
+and the page number can be plausible but false. Checking only the first two still
+ships wrong locations to the person who most needs them.
+
+The third is the one that forced the design. To recompute a location you need to
+know, for any character position in the text the model was shown, which page or
+paragraph of the original it came from — and that text has been extracted,
+concatenated, chunked, and reassembled before the model ever sees it. So
+extraction does not return a string. It returns located segments carrying start
+and end offsets that survive every later transformation, and chunking is built to
+preserve them rather than to produce clean prose. Verification then finds the
+quotation in the reassembled text, maps its offset back to the segment it
+genuinely lies in, and writes *that* location — correcting the model rather than
+displaying what it claimed.
+
+The second design decision is that verification is one-directional: a status can
+only be lowered against what the model asserted, never raised. A model that
+labels everything "supported" gains nothing by doing so, which removes the
+incentive the whole product would otherwise be exposed to. The same machinery
+runs over relationship links, which is why an unsupported line is never drawn
+between two boxes.
+
+---
+
 ## FIELD: Testing details
 
 **What was tested, and how**
