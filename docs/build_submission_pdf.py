@@ -220,7 +220,7 @@ def cover():
             ["Member", "Param Raj Singh (solo)"],
             ["Live application", f'<font color="#17567E">{APP_URL}</font>'],
             ["Source repository", f'<font color="#17567E">{REPO_URL}</font>'],
-            ["Tests", "327 automated tests, all passing"],
+            ["Tests", "329 automated tests, all passing"],
             ["Application code", "9,820 lines (excluding tests)"],
             ["Test code", "4,532 lines"],
             ["New dependencies added in Round 3", "None"],
@@ -465,7 +465,7 @@ def section_architecture():
             ["AI", "google-genai 3.0", "Structured JSON reconstruction"],
             ["Validation", "Pydantic 2.14", "Model output validated before storage"],
             ["Reports", "ReportLab 5.1", "PDF handover export"],
-            ["Tests", "pytest 9.2", "327 automated tests"],
+            ["Tests", "pytest 9.2", "329 automated tests"],
         ],
         widths=[26 * mm, 46 * mm, 93 * mm],
     ))
@@ -571,6 +571,39 @@ def section_architecture():
         "produced a draft is recorded and named in the report, so a handover never "
         "credits a model that did not write it.",
     ]))
+    out.append(P("3.6  The hardest problem we solved", "h2"))
+    out.append(P(
+        "<b>Making a model's output checkable rather than trusted.</b>"
+    ))
+    out.append(P(
+        "It is easy to ask a model to cite its sources. The hard part is that a "
+        "citation is itself model output, so it can be wrong in three independent "
+        "ways: the source ID can be invented, the quotation can be a paraphrase "
+        "the model believes it read, and the page number can be plausible but "
+        "false. Checking only the first two still ships wrong locations to the "
+        "person who most needs them."
+    ))
+    out.append(P(
+        "The third forced the design. To recompute a location you need to know, "
+        "for any character position in the text the model was shown, which page "
+        "or paragraph of the original it came from - and that text has been "
+        "extracted, concatenated, chunked and reassembled before the model ever "
+        "sees it. So extraction does not return a string. It returns located "
+        "segments carrying start and end offsets that survive every later "
+        "transformation, and chunking is built to preserve them rather than to "
+        "produce clean prose. Verification then finds the quotation in the "
+        "reassembled text, maps its offset back to the segment it genuinely lies "
+        "in, and writes <i>that</i> location - correcting the model rather than "
+        "displaying what it claimed."
+    ))
+    out.append(P(
+        "The second decision is that verification is one-directional: a status "
+        "can only be lowered against what the model asserted, never raised. A "
+        "model that labels everything \"supported\" gains nothing by doing so, "
+        "which removes the incentive the product would otherwise be exposed to. "
+        "The same machinery runs over relationship links, which is why an "
+        "unsupported line is never drawn between two boxes."
+    ))
     out.append(PageBreak())
     return out
 
@@ -611,7 +644,7 @@ def section_beyond():
 def section_testing():
     out = [P("5. Testing", "h1")]
     out.append(P(
-        "327 automated tests, all passing, run with "
+        "329 automated tests, all passing, run with "
         "<font face='Courier'>python -m pytest tests/ -q</font>. Every test runs "
         "against its own temporary SQLite file, and document fixtures are generated "
         "rather than committed, so the suite is reproducible and the repository holds "
@@ -622,7 +655,7 @@ def section_testing():
             ["Area", "Tests", "What is asserted"],
             ["Extraction", "45", "PDF, DOCX and TXT text with locations; encrypted, corrupt and image-only files reported honestly"],
             ["Reconstruction", "43", "Schema validation, chunking, caching by fingerprint, fallback behaviour, truncation disclosure"],
-            ["Robustness", "45", "Malformed, hostile and repeated input, and the public demo; see below"],
+            ["Robustness", "46", "Malformed, hostile and repeated input, and the public demo; see below"],
             ["GitHub", "36", "Fetching, field selection, error translation, and that the token is never persisted"],
             ["Evidence validation", "26", "Invented sources, paraphrases and wrong locations are rejected or corrected; status is never raised"],
             ["Access control", "26", "Each role attempts what it must not do and the call raises"],
