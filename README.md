@@ -9,6 +9,31 @@
 > it returns in about 30 seconds. That is Streamlit Community Cloud's free
 > tier, not the application.
 
+### Try it without signing up
+
+The sign-in screen leads with a **Try it now** panel: four accounts on one
+shared synthetic project, one button each. Password for all four is
+`tracedemo2026`.
+
+| Account | Role | What it is worth seeing |
+|---|---|---|
+| `owner@campusconnect.demo` | Owner | Everything, plus the Access screen where roles are granted |
+| `manager@campusconnect.demo` | Project manager | Add sources, run a reconstruction, approve and reject |
+| `developer@campusconnect.demo` | Incoming developer | Read every item and its sources, and export. Cannot change anything |
+| `viewer@campusconnect.demo` | Viewer | Only the approved handover. Source documents and unreviewed items are refused |
+
+**Start as the project manager** if the project has no draft yet — that role
+can run the reconstruction, after which the other three have something to
+read. Then sign in as the viewer and compare: no Project Workspace in the
+navigation, no approve controls, no counts of items they cannot see.
+
+The buttons are a convenience, not a side door. Each authenticates with the
+published password through the ordinary `AuthService.authenticate` path, so
+there is no route here that typing the credentials into the form would not
+also give you. The demo project is shared by everyone trying it, so you may
+find items another visitor decided on; re-running the reconstruction returns
+every item to *proposed*.
+
 TRACE turns scattered project records into a source-backed, reviewable handover
 so the next person can continue work without guessing.
 

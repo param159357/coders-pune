@@ -220,14 +220,41 @@ def cover():
             ["Member", "Param Raj Singh (solo)"],
             ["Live application", f'<font color="#17567E">{APP_URL}</font>'],
             ["Source repository", f'<font color="#17567E">{REPO_URL}</font>'],
-            ["Tests", "322 automated tests, all passing"],
+            ["Tests", "327 automated tests, all passing"],
             ["Application code", "9,820 lines (excluding tests)"],
             ["Test code", "4,532 lines"],
             ["New dependencies added in Round 3", "None"],
         ],
         widths=[52 * mm, 113 * mm],
     ))
-    out.append(Spacer(1, 7 * mm))
+    out.append(Spacer(1, 6 * mm))
+    out.append(P("Try it without signing up", "h2"))
+    out.append(P(
+        "The sign-in screen leads with a <b>Try it now</b> panel: four accounts on "
+        "one shared synthetic project, one button each. The password for all four "
+        "is <font face='Courier'>tracedemo2026</font>, so they can be typed into the "
+        "form instead if you prefer."
+    ))
+    out.append(table(
+        [
+            ["Account", "Role", "Worth seeing"],
+            ["owner@campusconnect.demo", "Owner", "Everything, plus the Access screen where roles are granted"],
+            ["manager@campusconnect.demo", "Project manager", "Add sources, run a reconstruction, approve and reject"],
+            ["developer@campusconnect.demo", "Incoming developer", "Read every item and its sources, and export. Cannot change anything"],
+            ["viewer@campusconnect.demo", "Viewer", "Only the approved handover. Source documents and unreviewed items are refused"],
+        ],
+        widths=[52 * mm, 30 * mm, 83 * mm],
+    ))
+    out.append(Spacer(1, 3))
+    out.append(P(
+        "<b>Start as the project manager</b> if the project has no draft yet - that "
+        "role can run the reconstruction, after which the other three have something "
+        "to read. Then sign in as the viewer and compare: no Project Workspace in the "
+        "navigation, no approve controls, and no counts of items they are not allowed "
+        "to see. That contrast is improvement 2 working, rather than described.",
+        "small",
+    ))
+    out.append(Spacer(1, 5 * mm))
     out.append(P(
         "<b>Note on the hosted link.</b> The app runs on Streamlit Community Cloud's "
         "free tier, which puts an app to sleep after a period of inactivity. If you "
@@ -435,7 +462,7 @@ def section_architecture():
             ["AI", "google-genai 3.0", "Structured JSON reconstruction"],
             ["Validation", "Pydantic 2.14", "Model output validated before storage"],
             ["Reports", "ReportLab 5.1", "PDF handover export"],
-            ["Tests", "pytest 9.2", "322 automated tests"],
+            ["Tests", "pytest 9.2", "327 automated tests"],
         ],
         widths=[26 * mm, 46 * mm, 93 * mm],
     ))
@@ -581,7 +608,7 @@ def section_beyond():
 def section_testing():
     out = [P("5. Testing", "h1")]
     out.append(P(
-        "322 automated tests, all passing, run with "
+        "327 automated tests, all passing, run with "
         "<font face='Courier'>python -m pytest tests/ -q</font>. Every test runs "
         "against its own temporary SQLite file, and document fixtures are generated "
         "rather than committed, so the suite is reproducible and the repository holds "
@@ -592,7 +619,7 @@ def section_testing():
             ["Area", "Tests", "What is asserted"],
             ["Extraction", "45", "PDF, DOCX and TXT text with locations; encrypted, corrupt and image-only files reported honestly"],
             ["Reconstruction", "43", "Schema validation, chunking, caching by fingerprint, fallback behaviour, truncation disclosure"],
-            ["Robustness", "39", "Malformed, hostile and repeated input; see below"],
+            ["Robustness", "45", "Malformed, hostile and repeated input, and the public demo; see below"],
             ["GitHub", "36", "Fetching, field selection, error translation, and that the token is never persisted"],
             ["Evidence validation", "26", "Invented sources, paraphrases and wrong locations are rejected or corrected; status is never raised"],
             ["Access control", "26", "Each role attempts what it must not do and the call raises"],
